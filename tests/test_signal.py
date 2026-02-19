@@ -181,15 +181,4 @@ def test_causality(get_univariate_data, get_multivariate_data):
                 (signal_m.tests_stat['causality: grangercausalitytests'][t][1] > 0.05))
 
 
-def test_operations(get_univariate_data):
-    signal = Signal(get_univariate_data, 'tests')
-    with pytest.raises(Exception):
-        signal.apply_operations(['trend', 'seasonality'])
-    tstamp = '1958-12-01'
-    signal.validation_split(tstamp)
-    with pytest.raises(Exception):
-        signal.apply_operations(['outliers'])
-    signal.apply_operations(['trend', 'seasonality'])
-    assert signal.rest_data.shape == signal.data.shape
-    assert signal.rest_train_data.shape == signal.train_data.shape
 

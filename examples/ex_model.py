@@ -35,8 +35,10 @@ if __name__ == '__main__':
     timestamp = '1958-12-01'
     signal.validation_split(timestamp=timestamp)
 
-    # --- Remove trend and seasonality ---
-    signal.apply_operations(['trend', 'seasonality'])
+    # --- Remove trend using decomposition ---
+    from pasts.operations import Trend
+    signal.decompose()
+    signal.residual -= Trend().fit(signal.data)
     Visualization(signal).plot_signal()
 
     # --- Apply models ---
@@ -109,8 +111,9 @@ if __name__ == '__main__':
     timestamp = '2022-06-01'
     signal_m.validation_split(timestamp=timestamp)
 
-    # --- Remove trend ---
-    signal_m.apply_operations(['trend'])
+    # --- Remove trend using decomposition ---
+    signal_m.decompose()
+    signal_m.residual -= Trend().fit(signal_m.data)
     Visualization(signal_m).plot_signal()
 
     # --- Apply models ---

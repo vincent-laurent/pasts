@@ -1,9 +1,12 @@
+from pasts.datacube import DataCube
+from pasts.decomposition import Residual, Decomposition
 from pasts.signal import Signal
 from pasts.visualization import Visualization
-from pasts.operations import Operation
 
 __all__ = [
+    "DataCube",
+    "Decomposition",
+    "Residual",
     "Signal",
     "Visualization",
-    "Operation"
 ]

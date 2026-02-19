@@ -79,6 +79,7 @@ dt = pd.DataFrame(series.values())
 dt.rename(columns={0: 'passengers'}, inplace=True)
 dt.index = series.time_index
 signal = Signal(dt)
+signal_no_trend = signal - signal.trend()
 ```
 ### Visualize and analyze data
 The `properties` attribute contains some information about the data.

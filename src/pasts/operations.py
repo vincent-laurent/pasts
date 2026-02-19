@@ -10,9 +10,6 @@
 
 import numpy as np
 import pandas as pd
-from darts import TimeSeries
-from darts.models import XGBModel
-from darts.utils.statistics import check_seasonality
 from sklearn.linear_model import LinearRegression
 
 
@@ -238,7 +235,7 @@ class Seasonality:
         seasonality: int
             Seasonality period.
         """
-        self.seasonality = int(seasonality)
+        self.period = int(seasonality)
 
     def fit(self, X: pd.DataFrame) -> None:
         """
@@ -259,13 +256,15 @@ class Seasonality:
         df_diff = pd.DataFrame(index=self.time_index, columns=X.columns)
         for col in X.columns:
             values = X[col].values
-            diff = [0 for _ in range(self.seasonality)]
-            for i in range(self.seasonality, len(values)):
-                res = values[i - self.seasonality]
+            diff = [0 for _ in range(self.period)]
+            for i in range(self.period, len(values)):
+                res = values[i - self.period]
                 diff.append(res)
             df_diff[col] = diff
         self.seasonal_component = df_diff
-        self.estimator_future_season = XGBModel(lags=self.seasonality)
+        from darts import TimeSeries
+        from darts.models import XGBModel
+        self.estimator_future_season = XGBModel(lags=self.period)
         self.estimator_future_season.fit(TimeSeries.from_dataframe(self.seasonal_component))
 
     def transform(self, i: int) -> pd.DataFrame:
@@ -283,7 +282,7 @@ class Seasonality:
         Computed dataframe.
         """
         if i > 0:
-            output = self.estimator_future_season.predict(i).pd_dataframe()
+            output = self.estimator_future_season.predict(i).to_dataframe()
         else:
             output = self.seasonal_component.iloc[i:]
         return - output
@@ -303,127 +302,9 @@ class Seasonality:
         Computed dataframe.
         """
         if i > 0:
-            output = self.estimator_future_season.predict(i).pd_dataframe()
+            output = self.estimator_future_season.predict(i).to_dataframe()
         else:
             output = self.seasonal_component.iloc[i:]
         return output
 
 
-class Operation:
-    """
-    A class to apply operations on time series.
-
-    Attributes
-    ----------
-    train_data : pd.Dataframe
-        Time series on which to fit operators.
-    rest_data : pd.Dataframe
-        Remaining data after applying operations.
-    dict_op : dict
-        Stores applied operations.
-        keys: names of operations
-        values: tuple(transform function, reverse_transform function)
-    implemented operations : dict
-        Stores implemented operations.
-        keys: names of operations
-        values: fitting functions
-
-    Methods
-    -------
-    trend():
-        Fits Trend object to training data.
-    season():
-        Fits Seasonality object to training data.
-    fit_transform(list_op):
-        Fits requested operators and transforms training data.
-    transform(data, reverse=True):
-        Applies operations or reverse operations on passed data.
-    """
-    def __init__(self, train_data: pd.DataFrame):
-        """
-        Constructs all the necessary attributes for the operation object.
-
-        Parameters
-        ----------
-        train_data: pd.Dataframe
-            Time series on which to fit operators.
-            Index must be of type DatetimeIndex.
-        """
-        self.train_data = train_data
-        self.rest_data = train_data.copy()
-        self.dict_op = {}
-        self.__implemented_operations = {'trend': self._trend, 'seasonality': self._season}
-
-    def _trend(self) -> None:
-        """
-        Fits Trend operator on training data.
-        Adds item in dict_op.
-        """
-        cls = Trend()
-        cls.fit(self.rest_data)
-        self.dict_op['trend'] = (cls.transform, cls.reverse_transform)
-
-    def _season(self) -> None:
-        """
-        Fits Seasonality operator on training data.
-        Adds item in dict_op.
-        """
-        if self.rest_data.shape[1] > 1:
-            raise Exception("Removal of seasonal component is not implemented for multivariate TimeSeries.")
-        seasonality = check_seasonality(TimeSeries.from_dataframe(
-            self.rest_data))
-        if seasonality[0]:
-            cls = Seasonality(seasonality[1])
-            cls.fit(self.rest_data)
-            self.dict_op['seasonality'] = (cls.transform, cls.reverse_transform)
-
-    def fit_transform(self, list_op: list[str]) -> pd.DataFrame:
-        """
-        Fits requested operators and transforms training data.
-
-        Parameters
-        ----------
-        list_op : list[str]
-            List of names of operations to apply.
-
-        Returns
-        -------
-        Attribute rest_data
-        """
-        for op in list_op:
-            if op not in self.__implemented_operations.keys():
-                raise Exception(f"Operation {op} is not implemented. "
-                                f"Choose operations in {self.__implemented_operations.keys()}.")
-            self.__implemented_operations[op]()
-            frame = self.dict_op[op][0](-len(self.rest_data))
-            self.rest_data += frame
-        return self.rest_data
-
-    def transform(self, data: pd.DataFrame, reverse=True) -> pd.DataFrame:
-        """
-        Applies operations or reverse operations on passed data.
-
-        Parameters
-        ----------
-        data : pd.Dataframe
-            Time series to transform.
-            Index must be of type DatetimeIndex.
-        reverse : bool (default=True)
-            Whether to perform the reverse operation.
-
-        Returns
-        -------
-        Transformed data
-        """
-        intersection_length = len(self.rest_data.index.intersection(data.index))
-        if intersection_length > 0:
-            i = -intersection_length
-        else:
-            i = len(data)
-        a = 1
-        if not reverse:
-            a = 0
-        for op in reversed(self.dict_op.values()):
-            frame = op[a](i)
-            data += frame
-        return data

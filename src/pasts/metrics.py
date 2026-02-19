@@ -11,14 +11,14 @@
 import pandas as pd
 from darts import TimeSeries
 import warnings
-from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.metrics import r2_score, mean_squared_error, root_mean_squared_error
 from darts.metrics import mape, smape, mae
 from pasts.statistical_tests import check_arguments
 
 
 dict_metrics_sklearn = {'r2': r2_score,
                         'mse': mean_squared_error,
-                        'rmse': mean_squared_error}
+                        'rmse': root_mean_squared_error}
 
 dict_metrics_darts = {'mape': mape,
                       'smape': smape,
@@ -91,7 +91,7 @@ class Metrics:
         Dataframe of scores with unit or time as index and metrics as columns
         """
         df_test = self.signal.test_data.copy()
-        df_pred = self.signal.models[model]['predictions'].pd_dataframe()
+        df_pred = self.signal.models[model]['predictions'].to_dataframe()
 
         if axis == 0:
             df_pred = df_pred.transpose()
@@ -108,10 +108,7 @@ class Metrics:
                 df_temp.dropna(inplace=True)
                 test = df_temp[df_temp.columns[0]].values
                 pred = df_temp[df_temp.columns[1]].values
-                if metric == 'rmse':
-                    results.loc[col, metric] = self.dict_metrics_sklearn[metric](test, pred, squared=False)
-                else:
-                    results.loc[col, metric] = self.dict_metrics_sklearn[metric](test, pred)
+                results.loc[col, metric] = self.dict_metrics_sklearn[metric](test, pred)
 
         return results
 
@@ -133,8 +130,8 @@ class Metrics:
         results = pd.DataFrame(index=ts_pred.columns, columns=list(self.dict_metrics_darts.keys()))
         for col in ts_pred.columns:
             for metric in self.dict_metrics_darts.keys():
-                df_test = ts_test.pd_dataframe()
-                df_pred = ts_pred.pd_dataframe()
+                df_test = ts_test.to_dataframe()
+                df_pred = ts_pred.to_dataframe()
                 zero_indices_test = df_test.index[df_test.eq(0.0).any(axis=1)]
                 zero_indices_pred = df_pred.index[df_pred.eq(0.0).any(axis=1)]
                 zero_indices = zero_indices_test.union(zero_indices_pred)

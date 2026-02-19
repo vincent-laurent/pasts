@@ -17,9 +17,9 @@ def test_plot_signal(get_univariate_data, get_multivariate_data):
     signal = Signal(get_univariate_data, 'tests')
     signal_m = Signal(get_multivariate_data, 'tests')
     Visualization(signal_m).plot_signal(display=False)
-    tstamp = '1958-12-01'
-    signal.validation_split(tstamp)
-    signal.apply_operations(['trend', 'seasonality'])
+    from pasts.operations import Trend
+    signal.decompose()
+    signal.residual -= Trend().fit(signal.data)
     Visualization(signal).plot_signal(display=False)
 
 

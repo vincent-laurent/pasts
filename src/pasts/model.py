@@ -8,14 +8,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
-import numpy as np
 from pandas import MultiIndex
-
 import pandas as pd
 from darts import TimeSeries
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
+
+if TYPE_CHECKING:
+    from pasts.signal import Signal
 
 
 class ModelAbstract(ABC):
@@ -34,7 +38,7 @@ class ModelAbstract(ABC):
     compute_final_estimator():
         Fits the model on whole dataset.
     """
-    def __init__(self, signal: "Signal"):
+    def __init__(self, signal: Signal):
         """
         Constructs all the necessary attributes for the model object.
 
@@ -56,7 +60,7 @@ class ModelAbstract(ABC):
 
 class Model(ModelAbstract):
 
-    def __init__(self, signal: "Signal"):
+    def __init__(self, signal: Signal):
         """
         Constructs all the necessary attributes for the model object.
 
@@ -97,7 +101,7 @@ class Model(ModelAbstract):
         train_tseries = TimeSeries.from_dataframe(self.signal.rest_train_data)
         if gridsearch:
             if parameters is None:
-                raise Exception("Please enter the parameters")
+                raise ValueError("Please enter the parameters")
             print('Performing the gridsearch for', model.__class__.__name__, '...')
             best_model, best_parameters, _ = model.gridsearch(parameters=parameters,
                                                               series=train_tseries,
@@ -109,9 +113,11 @@ class Model(ModelAbstract):
 
         model.fit(train_tseries)
         forecast = model.predict(len(self.signal.test_data))
-        if self.signal.operation_train is not None:
-            if self.signal.operation_train.dict_op:
-                forecast = TimeSeries.from_dataframe(self.signal.operation_train.transform(forecast.pd_dataframe()))
+        if self.signal._residual is not None:
+            from pasts.datacube import DataCube
+            forecast = TimeSeries.from_dataframe(
+                self.signal.decomposition.compose(DataCube(forecast.to_dataframe())).data
+            )
 
         return {'predictions': forecast, 'best_parameters': best_parameters, 'scores': {'unit_wise': {},
                                                                                         'time_wise': {}},
@@ -140,7 +146,7 @@ class Model(ModelAbstract):
 
 class AggregatedModel(ModelAbstract):
 
-    def __init__(self, signal: "Signal"):
+    def __init__(self, signal: Signal):
         """
         Constructs all the necessary attributes for the model object.
 
@@ -172,7 +178,7 @@ class AggregatedModel(ModelAbstract):
         'scores' : will be filled when scores are computed}
         """
         dict_pred = {model: self.signal.models[model][
-            'predictions'].pd_dataframe().copy() for model in model.keys()}
+            'predictions'].to_dataframe().copy() for model in model.keys()}
         df_test = self.signal.test_data.copy()
         weights = pd.DataFrame(index=MultiIndex.from_product([self.signal.test_data.index,
                                                              self.signal.test_data.columns], names=['Date', 'Unité']),
@@ -184,8 +190,7 @@ class AggregatedModel(ModelAbstract):
                 df_pred_temp = df_pred[df_pred.index < date]
                 df_test_temp = df_test[df_test.index < date]
                 for ref in weights.index.get_level_values(1).unique():
-                    weights.loc[(date, ref)][model_] = 1 / mean_squared_error(df_test_temp[ref], df_pred_temp[ref],
-                                                                              squared=False)
+                    weights.loc[(date, ref)][model_] = 1 / root_mean_squared_error(df_test_temp[ref], df_pred_temp[ref])
 
         for i in weights.index:
             weights.loc[i] = weights.loc[i] / (weights.loc[i].sum())
@@ -197,7 +202,7 @@ class AggregatedModel(ModelAbstract):
         for ref in df_ag.columns:
             res = [0 for _ in df_ag.index]
             for model_ in model.keys():
-                pred = self.signal.models[model_]['predictions'].pd_dataframe()[ref].values
+                pred = self.signal.models[model_]['predictions'].to_dataframe()[ref].values
                 res += pred * weights.loc[ref, model_]
             df_ag[ref] = res
 
@@ -219,20 +224,11 @@ class AggregatedModel(ModelAbstract):
         dict_models = self.signal.models['AggregatedModel']['models']
         df_ag = pd.DataFrame(index=self.signal.models[list(dict_models.keys())[0]]['forecast'].time_index,
                              columns=self.signal.models[list(dict_models.keys())[0]]['forecast'].columns)
-        # conf_itv = df_ag.copy()
-        # std = self.signal.models['AggregatedModel']['std_test']
         for ref in df_ag.columns:
             res = [0 for _ in df_ag.index]
-            # itv_inf = [0 for _ in df_ag.index]
-            # itv_sup = [0 for _ in df_ag.index]
             for model_ in dict_models.keys():
-                pred = self.signal.models[model_]['forecast'].pd_dataframe()[ref].values
+                pred = self.signal.models[model_]['forecast'].to_dataframe()[ref].values
                 res += pred * self.signal.models['AggregatedModel']['weights'].loc[ref, model_]
-                # itv_inf = [itv_inf[i] + self.signal.models['AggregatedModel']['weights'].loc[ref, model_] * (
-                #             pred[i] + (-1.96) * std[model_] * np.sqrt(i)) for i in range(len(itv_inf))]
-                # itv_sup = [itv_sup[i] + self.signal.models['AggregatedModel']['weights'].loc[ref, model_] * (
-                #             pred[i] + 1.96 * std[model_] * np.sqrt(i)) for i in range(len(itv_sup))]
             df_ag[ref] = res
-            # conf_itv[ref] = [[itv_inf[i], itv_sup[i]] for i in range(len(itv_inf))]
 
-        return TimeSeries.from_dataframe(df_ag)  # , conf_itv
+        return TimeSeries.from_dataframe(df_ag)

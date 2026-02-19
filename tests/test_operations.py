@@ -8,7 +8,7 @@ def test_trend():
     trend = Trend()
     series = AirPassengersDataset().load()
     self = trend
-    dataframe = series.pd_dataframe()
+    dataframe = series.to_dataframe()
     dataframe["#Passengers2"] = dataframe["#Passengers"]
     dataframe["#Passengers2"] *= 100
     i = 10
