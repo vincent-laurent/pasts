@@ -29,7 +29,7 @@ import pandas as pd
 from darts.models import ExponentialSmoothing, RandomForest
 
 from pasts.signal import Signal
-from pasts.operations import Trend
+from pasts.components import Trend
 from pasts.visualization import Visualization
 
 warnings.filterwarnings("ignore")

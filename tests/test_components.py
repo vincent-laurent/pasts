@@ -1,13 +1,14 @@
 import numpy as np
 from darts.datasets import AirPassengersDataset
 
-from pasts.operations import Trend
+from pasts.components import DartsModel, ParametricModel, Trend
+from pasts.components.aggregated_model import AggregatedModel
+from pasts.core.base_model import TimeSeriesModel
 
 
 def test_trend():
     trend = Trend()
     series = AirPassengersDataset().load()
-    self = trend
     dataframe = series.to_dataframe()
     dataframe["#Passengers2"] = dataframe["#Passengers"]
     dataframe["#Passengers2"] *= 100
@@ -18,3 +19,11 @@ def test_trend():
     assert len(trend.coef_) == dataframe.shape[1]
     assert len(trend.intercept_) == dataframe.shape[1]
     assert all(dataframe.columns == trend.transform(10).columns)
+
+
+def test_hierarchy():
+    assert issubclass(Trend, ParametricModel)
+    assert issubclass(Trend, TimeSeriesModel)
+    assert issubclass(ParametricModel, TimeSeriesModel)
+    assert issubclass(DartsModel, TimeSeriesModel)
+    assert issubclass(AggregatedModel, TimeSeriesModel)

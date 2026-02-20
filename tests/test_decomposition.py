@@ -2,9 +2,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pasts.datacube import DataCube
-from pasts.decomposition import Residual, Decomposition, _to_dataframe
-from pasts.operations import Trend
+from pasts.core.datacube import DataCube, _to_dataframe
+from pasts.core.decomposition import Decomposition
+from pasts.components import Trend
 
 
 # ---------------------------------------------------------------------------
@@ -34,40 +34,40 @@ def alpha_dc(simple_df):
 # Residual — binary ops recording
 # ---------------------------------------------------------------------------
 
-class TestResidualBinary:
+class TestDataCubeBinary:
 
     def test_isub_records(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         comp = DataCube(pd.DataFrame(1.0, index=simple_df.index, columns=simple_df.columns))
         r -= comp
         assert len(r._ops) == 1
         assert r._ops[0][0] == 'binary'
 
     def test_itruediv_records(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         r /= 2
         assert len(r._ops) == 1
         assert r._ops[0][0] == 'binary'
 
     def test_imul_records(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         r *= 3
         assert len(r._ops) == 1
 
     def test_iadd_records(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         r += 5
         assert len(r._ops) == 1
 
     def test_chained_ops(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         r -= 10
         r /= 2
         r *= 3
         assert len(r._ops) == 3
 
     def test_isub_mutates_data(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         before = r.data.copy()
         r -= 10
         assert (r.data == before - 10).all().all()
@@ -77,22 +77,22 @@ class TestResidualBinary:
 # Residual — unary ops recording
 # ---------------------------------------------------------------------------
 
-class TestResidualUnary:
+class TestDataCubeUnary:
 
     def test_apply_records(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         r.apply(np.log, np.exp)
         assert len(r._ops) == 1
         assert r._ops[0][0] == 'unary'
 
     def test_apply_mutates(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         expected = np.log(simple_df)
         r.apply(np.log, np.exp)
         pd.testing.assert_frame_equal(r.data, expected)
 
     def test_apply_returns_self(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         ret = r.apply(np.log, np.exp)
         assert ret is r
 
@@ -106,7 +106,7 @@ class TestDecompositionCompose:
     def test_roundtrip_sub(self, simple_df):
         """signal -= C  →  compose should add C back."""
         original = simple_df.copy()
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         comp = DataCube(pd.DataFrame(10.0, index=simple_df.index, columns=simple_df.columns))
         r -= comp
         decomp = Decomposition(r._ops)
@@ -116,7 +116,7 @@ class TestDecompositionCompose:
     def test_roundtrip_sub_div(self, simple_df, alpha_dc):
         """signal -= T; signal /= alpha  →  roundtrip."""
         original = simple_df.copy()
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         trend = Trend().fit(simple_df)
         r -= trend
         r /= alpha_dc
@@ -127,7 +127,7 @@ class TestDecompositionCompose:
     def test_roundtrip_with_log(self, simple_df):
         """signal -= offset; apply(log, exp)  →  roundtrip."""
         original = simple_df.copy()
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         # Ensure positive values before log
         min_val = simple_df.min().min()
         offset = DataCube(pd.DataFrame(
@@ -142,7 +142,7 @@ class TestDecompositionCompose:
     def test_roundtrip_scalar(self, simple_df):
         """Operations with scalars."""
         original = simple_df.copy()
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         r -= 50
         r /= 2
         decomp = Decomposition(r._ops)
@@ -157,7 +157,7 @@ class TestDecompositionCompose:
 class TestDecompositionRepr:
 
     def test_repr_simple(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         trend = Trend().fit(simple_df)
         r -= trend
         decomp = Decomposition(r._ops)
@@ -166,7 +166,7 @@ class TestDecompositionRepr:
         assert "Trend" in text
 
     def test_repr_with_unary(self, simple_df):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         offset = DataCube(pd.DataFrame(
             simple_df.min().min() - 1, index=simple_df.index, columns=simple_df.columns
         ))
@@ -185,7 +185,7 @@ class TestDecompositionRepr:
 class TestDecompositionComponents:
 
     def test_components_list(self, simple_df, alpha_dc):
-        r = Residual(simple_df.copy())
+        r = DataCube(simple_df.copy())
         trend = Trend().fit(simple_df)
         r -= trend
         r /= alpha_dc
@@ -272,7 +272,8 @@ class TestSignalDecomposition:
         signal = Signal(simple_df, path=str(tmp_path))
         signal.decompose()
         assert signal.residual is not None
-        assert isinstance(signal.residual, Residual)
+        from pasts.signal import Signal
+        assert isinstance(signal.residual, Signal)
         pd.testing.assert_frame_equal(signal.residual.data, simple_df)
 
     def test_decomposition_property(self, simple_df, tmp_path):

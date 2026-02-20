@@ -60,7 +60,7 @@ The documentation can then be accessed from `doc/_build/html/index.html`.
 ## Usage and example
 You can find examples for the `Signal` class for univariate and multivariate series here: `examples/ex_model.py`
 
-The `Operation` class can be used on its own. Find an example here: `examples/ex_operations.py`
+The `Component` class can be used on its own. Find an example here: `examples/ex_components.py`
 
 ### Start project
 To start using the package, import you data as a pandas dataframe with a temporal index and use the `Signal` class.
@@ -126,7 +126,7 @@ Choose a date to split the series between train and test.
 timestamp = '1958-12-01'
 signal.validation_split(timestamp=timestamp)
 ```
-The library provides some operations to apply before using forecasting models.
+The library provides some components to apply before using forecasting models.
 In this example, both linear trend and seasonality are removed. Machine Learning models will be trained on the remainig series, then inverse functions will be applied to the predicted series.
 ```python
 signal.apply_operations(['trend', 'seasonality'])

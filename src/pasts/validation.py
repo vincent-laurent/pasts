@@ -8,10 +8,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
+import logging
 from typing import Union
 
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
+
+logger = logging.getLogger(__name__)
 
 
 class Validation:
@@ -41,9 +44,7 @@ class Validation:
 
     @property
     def cv_tseries(self):
-        """
-        Cross-validation indexes if requested (default None)
-        """
+        """Cross-validation indexes if requested (default None)"""
         return self.__cv_tseries
 
     def split_cv(self, timestamp: Union[int, str, pd.Timestamp], n_splits_cv=None) -> None:
@@ -60,15 +61,13 @@ class Validation:
         self.train_data = self.__data.loc[self.__data.index <= timestamp]
         self.test_data = self.__data.loc[self.__data.index > timestamp]
 
-        print("Split applied on :", timestamp, '\n')
+        logger.info("Split applied on: %s", timestamp)
 
         if n_splits_cv is not None:
-            time_series_cross_validation = TimeSeriesSplit(n_splits=n_splits_cv)
-
-            for fold, (train_index, test_index) in enumerate(time_series_cross_validation.split(self.train_data)):
-                print("Fold: {}".format(fold))
-                print("TRAIN indices:", train_index[0], " -->", train_index[-1])
-                print("TEST  indices:", test_index[0], "-->", test_index[-1])
-                print("\n")
-
-            self.__cv_tseries = time_series_cross_validation.split(self.train_data)
+            cv = TimeSeriesSplit(n_splits=n_splits_cv)
+            splits = list(cv.split(self.train_data))
+            for fold, (train_index, test_index) in enumerate(splits):
+                logger.info("Fold %d: train %d→%d, test %d→%d",
+                            fold, train_index[0], train_index[-1],
+                            test_index[0], test_index[-1])
+            self.__cv_tseries = iter(splits)

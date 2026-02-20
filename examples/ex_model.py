@@ -36,7 +36,7 @@ if __name__ == '__main__':
     signal.validation_split(timestamp=timestamp)
 
     # --- Remove trend using decomposition ---
-    from pasts.operations import Trend
+    from pasts.components import Trend
     signal.decompose()
     signal.residual -= Trend().fit(signal.data)
     Visualization(signal).plot_signal()

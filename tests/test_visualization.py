@@ -17,7 +17,7 @@ def test_plot_signal(get_univariate_data, get_multivariate_data):
     signal = Signal(get_univariate_data, 'tests')
     signal_m = Signal(get_multivariate_data, 'tests')
     Visualization(signal_m).plot_signal(display=False)
-    from pasts.operations import Trend
+    from pasts.components import Trend
     signal.decompose()
     signal.residual -= Trend().fit(signal.data)
     Visualization(signal).plot_signal(display=False)

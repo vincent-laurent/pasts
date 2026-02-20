@@ -1,12 +1,16 @@
-from pasts.datacube import DataCube
-from pasts.decomposition import Residual, Decomposition
+from pasts.core import DataCube, Decomposition, TimeSeriesModel
+from pasts.components import AggregatedModel, DartsModel, ParametricModel, Trend
 from pasts.signal import Signal
 from pasts.visualization import Visualization
 
 __all__ = [
+    "AggregatedModel",
     "DataCube",
+    "DartsModel",
     "Decomposition",
-    "Residual",
+    "ParametricModel",
     "Signal",
+    "TimeSeriesModel",
+    "Trend",
     "Visualization",
 ]

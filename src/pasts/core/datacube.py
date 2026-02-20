@@ -8,6 +8,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
+import functools
+import operator
+
 import pandas as pd
 
 
@@ -23,6 +26,45 @@ def _check_temporal_index(index: pd.Index) -> None:
     )
 
 
+BINARY_INVERSE = {
+    operator.sub: operator.add,
+    operator.add: operator.sub,
+    operator.mul: operator.truediv,
+    operator.truediv: operator.mul,
+}
+
+BINARY_SYMBOL = {
+    operator.add: '+',
+    operator.sub: '-',
+    operator.mul: '*',
+    operator.truediv: '/',
+}
+
+
+def _record(op):
+    """Decorator: records the inverse binary op in _ops before executing."""
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, other):
+            self._ops.append(('binary', BINARY_INVERSE[op], other))
+            return method(self, other)
+        return wrapper
+    return decorator
+
+
+def _to_dataframe(component, index: pd.Index):
+    """Extract a DataFrame from any component type."""
+    if isinstance(component, DataCube):
+        return component.data.reindex(index)
+    if hasattr(component, 'reverse_transform'):
+        return component.reverse_transform(-len(index))
+    if callable(component):
+        return component(index)
+    if isinstance(component, (int, float)):
+        return component
+    raise TypeError(f"Unsupported component type: {type(component)}")
+
+
 class DataCube:
     """
     Data structure wrapping a DataFrame with a temporal index.
@@ -30,21 +72,69 @@ class DataCube:
     The index (X axis) must be either a ``DatetimeIndex`` or a numeric
     index (int / float).  A ``TypeError`` is raised otherwise.
 
+    In-place operators (-=, /=, *=, +=) are recorded in ``_ops`` so that
+    a :class:`~pasts.core.decomposition.Decomposition` can reverse them.
+
     Operators +, -, *, / delegate directly to pandas.
 
     Attributes
     ----------
     data : pd.DataFrame
         The underlying DataFrame.
+    _ops : list
+        Stack of recorded operations (populated by in-place operators).
     """
 
     def __init__(self, data: pd.DataFrame):
         _check_temporal_index(data.index)
         self._data = data
+        self._ops = []
 
     @property
     def data(self):
         return self._data
+
+    # --- In-place binary operators (recorded) ---
+
+    @_record(operator.sub)
+    def __isub__(self, other):
+        self._data -= _to_dataframe(other, self._data.index)
+        return self
+
+    @_record(operator.truediv)
+    def __itruediv__(self, other):
+        self._data /= _to_dataframe(other, self._data.index)
+        return self
+
+    @_record(operator.mul)
+    def __imul__(self, other):
+        self._data *= _to_dataframe(other, self._data.index)
+        return self
+
+    @_record(operator.add)
+    def __iadd__(self, other):
+        self._data += _to_dataframe(other, self._data.index)
+        return self
+
+    # --- Unary transformation (recorded) ---
+
+    def apply(self, func, inverse) -> "DataCube":
+        """Apply a unary function and record its inverse.
+
+        Parameters
+        ----------
+        func : callable
+            Function to apply to the data (e.g. ``np.log``).
+        inverse : callable
+            Inverse of *func* (e.g. ``np.exp``), used during recomposition.
+
+        Returns
+        -------
+        self
+        """
+        self._ops.append(('unary', func, inverse))
+        self._data = func(self._data)
+        return self
 
     # --- Forward binary operators ---
 

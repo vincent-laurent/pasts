@@ -18,12 +18,16 @@ import re
 
 import numpy as np
 import pandas as pd
-from pasts.datacube import DataCube
-from pasts.decomposition import Residual, Decomposition
-from pasts.model import Model, AggregatedModel
-from pasts.statistical_tests import TestStatistics, dict_test
+from darts import TimeSeries
+from pasts.core.datacube import DataCube
+from pasts.core.decomposition import Decomposition
+from pasts.components.aggregated_model import AggregatedModel, _weighted_aggregate
+from pasts.statistical_tests import TestStatistics
 from pasts.validation import Validation
 from pasts.metrics import Metrics
+
+# Maps non-stationary test types to their canonical test name (used as dict key)
+_TEST_NAMES = {'seasonality': 'check_seasonality', 'causality': 'grangercausalitytests'}
 
 
 def profiling(data: pd.DataFrame) -> dict:
@@ -44,6 +48,18 @@ def profiling(data: pd.DataFrame) -> dict:
             'is_univariate': data.shape[1] == 1,
             'nanSum': data.isnull().sum(),
             'quantiles': data.quantile([0, 0.05, 0.50, 0.95, 0.99, 1]).T}
+
+
+def _build_ci(pred, std_values: dict) -> pd.DataFrame:
+    """Build a confidence-interval DataFrame from a predictions TimeSeries and per-column std values."""
+    df_itv = pd.DataFrame(index=pred.time_index, columns=pred.columns)
+    weights = np.arange(1, len(pred) + 1, dtype=float)
+    for ref in pred.columns:
+        vals = pred[ref].values()[:, 0]
+        itv_inf = vals - 1.96 * std_values[ref] * np.sqrt(weights)
+        itv_sup = vals + 1.96 * std_values[ref] * np.sqrt(weights)
+        df_itv[ref] = list(zip(itv_inf, itv_sup))
+    return df_itv
 
 
 class Signal(DataCube):
@@ -72,7 +88,7 @@ class Signal(DataCube):
         Generates forecasts for future dates.
     """
 
-    def __init__(self, data: pd.DataFrame, path: str):
+    def __init__(self, data: pd.DataFrame, path: str = None):
         """
         Constructs all the necessary attributes for the signal object.
 
@@ -81,11 +97,12 @@ class Signal(DataCube):
         data : pd.Dataframe
                 Dataframe of time series with time as index and one or several entities as columns.
                 Index must be of type DatetimeIndex.
-        path : str
+        path : str, optional
                 The path to the directory where the Signal data will be stored. The directory may or
                 may not exist. If it doesn't exist, it will be created automatically.
+                If None, no directory is created (e.g. when used as a residual).
         """
-        if not os.path.exists(path):
+        if path and not os.path.exists(path):
             os.makedirs(path)
         self.path = path
         super().__init__(data)
@@ -141,19 +158,20 @@ class Signal(DataCube):
         """Initialize the residual as a copy of the signal data.
 
         After calling this method, operate on ``signal.residual`` to build
-        the decomposition (e.g. ``signal.residual -= Trend().fit(signal)``).
+        the decomposition (e.g. ``signal.residual -= Trend().fit(signal.data)``).
+        The residual is itself a :class:`Signal`, so all analysis methods
+        (``apply_model``, ``validation_split``, etc.) can be used on it directly.
         """
-        self._residual = Residual(self.data.copy())
+        self._residual = Signal(self.data.copy())
 
     @property
-    def residual(self) -> "Residual":
-        """Current residual (a :class:`Residual`, subclass of DataCube)."""
+    def residual(self) -> "Signal":
+        """Current residual (a :class:`Signal`)."""
         return self._residual
 
     @residual.setter
     def residual(self, value):
         self._residual = value
-         
 
     @property
     def decomposition(self) -> "Decomposition":
@@ -181,17 +199,12 @@ class Signal(DataCube):
         None
         """
         call_test = TestStatistics(self)
-        if (type_test == 'stationary') & (test_stat_name is None):
+        if type_test == 'stationary' and test_stat_name is None:
             test_stat_name = 'adfuller'
-            self.tests_stat[f"{type_test}: {test_stat_name}"] = call_test.apply(type_test, test_stat_name,
-                                                                                *args, **kwargs)
-        elif (type_test == 'stationary') & (test_stat_name is not None):
-            self.tests_stat[f"{type_test}: {test_stat_name}"] = call_test.apply(type_test, test_stat_name,
-                                                                                *args, **kwargs)
-        else:
-            test_stat_name = dict_test[type_test]
-            self.tests_stat[f"{type_test}: {test_stat_name}"] = call_test.apply(type_test, test_stat_name,
-                                                                                *args, **kwargs)
+        elif type_test != 'stationary':
+            test_stat_name = _TEST_NAMES[type_test]
+        self.tests_stat[f"{type_test}: {test_stat_name}"] = call_test.apply(type_test, test_stat_name,
+                                                                            *args, **kwargs)
 
     def validation_split(self, timestamp: Union[int, str, pd.Timestamp], n_splits_cv=None) -> None:
         """
@@ -247,7 +260,7 @@ class Signal(DataCube):
         -------
         None
         """
-        self.models[model.__class__.__name__] = Model(self).apply(copy.deepcopy(model), gridsearch, parameters)
+        self.models[model.__class__.__name__] = self._fit_and_predict(copy.deepcopy(model), gridsearch, parameters)
         if save_model:
             joblib.dump(self.models[model.__class__.__name__], os.path.join(self.path,
                                                                             f'{model.__class__.__name__}_train_jlib'))
@@ -313,21 +326,69 @@ class Signal(DataCube):
                 self.apply_model(model)
         else:
             for model_name, model in dict_models.items():
-                if model_name not in self.models.keys():
-                    print(f'{model_name} has not yet been fitted. Fitting {model_name}...')
+                if model_name not in self.models:
+                    warnings.warn(f'{model_name} has not yet been fitted. Fitting {model_name}...')
                     self.apply_model(model)
                     if save_model:
                         joblib.dump(self.models[model_name], os.path.join(self.path, f'{model_name}_train_jlib'))
-        self.models['AggregatedModel'] = AggregatedModel(self).apply(dict_models)
+        predictions = {
+            m: self.models[m]['predictions'].to_dataframe().copy()
+            for m in dict_models
+        }
+        weights = AggregatedModel.compute_weights(predictions, self.test_data.copy())
+        df_ag = _weighted_aggregate(predictions, weights)
+        self.models['AggregatedModel'] = {
+            'predictions': TimeSeries.from_dataframe(df_ag),
+            'weights': weights,
+            'models': dict_models,
+            'scores': {'unit_wise': {}, 'time_wise': {}},
+        }
         if save_model:
             joblib.dump(self.models['AggregatedModel'], os.path.join(self.path, 'AggregatedModel_train_jlib'))
             joblib.dump(self.test_data, os.path.join(self.path, 'test_data_jlib'))
             joblib.dump(self.train_data, os.path.join(self.path, 'train_data_jlib'))
 
+    def _fit_and_predict(self, model, gridsearch=False, parameters=None) -> dict:
+        """Fit a Darts model on train data and predict on test set."""
+        train_tseries = TimeSeries.from_dataframe(self.rest_train_data)
+        if gridsearch:
+            if parameters is None:
+                raise ValueError("Please enter the parameters")
+            print('Performing the gridsearch for', model.__class__.__name__, '...')
+            best_model, best_parameters, _ = model.gridsearch(
+                parameters=parameters, series=train_tseries,
+                start=0.5, forecast_horizon=5
+            )
+            model = best_model
+        else:
+            best_parameters = "default"
+
+        model.fit(train_tseries)
+        forecast = model.predict(len(self.test_data))
+        if self._residual is not None:
+            forecast = TimeSeries.from_dataframe(
+                self.decomposition.compose(DataCube(forecast.to_dataframe())).data
+            )
+        return {
+            'predictions': forecast,
+            'best_parameters': best_parameters,
+            'scores': {'unit_wise': {}, 'time_wise': {}},
+            'estimator': model,
+        }
+
+    def _fit_on_full_data(self, model_name: str):
+        """Refit model on full dataset. Requires prior fit on train set."""
+        if model_name not in self.models:
+            raise AttributeError(f'{model_name} has not been fitted.')
+        model = self.models[model_name]['estimator']
+        train_temp = TimeSeries.from_dataframe(self.rest_data)
+        model.fit(train_temp)
+        return model
+
     def _ensure_final_estimator(self, model_name: str) -> None:
         if 'final_estimator' not in self.models[model_name]:
-            print(f"Fitting model {model_name} on whole dataset...")
-            self.models[model_name]['final_estimator'] = Model(self).compute_final_estimator(model_name)
+            warnings.warn(f"Fitting model {model_name} on whole dataset...")
+            self.models[model_name]['final_estimator'] = self._fit_on_full_data(model_name)
 
     def _save_common_data(self) -> None:
         joblib.dump(self.test_data, os.path.join(self.path, 'test_data_jlib'))
@@ -374,64 +435,52 @@ class Signal(DataCube):
             if save_model:
                 joblib.dump(self.models[model], os.path.join(self.path, f'{model}_final_jlib'))
 
-        self.models['AggregatedModel']['forecast'] = AggregatedModel(self).compute_final_estimator()
+        dict_models = self.models['AggregatedModel']['models']
+        weights = self.models['AggregatedModel']['weights']
+        forecast_predictions = {
+            m: self.models[m]['forecast'].to_dataframe()
+            for m in dict_models
+        }
+        self.models['AggregatedModel']['forecast'] = TimeSeries.from_dataframe(
+            _weighted_aggregate(forecast_predictions, weights)
+        )
         if save_model:
             joblib.dump(self.models['AggregatedModel'], os.path.join(self.path, 'AggregatedModel_final_jlib'))
             self._save_common_data()
 
     def _conf_interval_test(self, model_name: str, window_size: int = 6):
-        if model_name not in self.models.keys():
+        if model_name not in self.models:
             raise AttributeError(f'{model_name} has not been fitted.')
         pred = self.models[model_name]['predictions']
-        df_itv = pd.DataFrame(index=pred.time_index, columns=pred.columns)
-        df_residuals = df_itv.copy()
-        std = {}
+        df_residuals = pd.DataFrame(index=pred.time_index, columns=pred.columns)
+        std_values = {}
         for ref in pred.columns:
             errors = self.test_data[ref].values - pred[ref].values()[:, 0]
             df_residuals[ref] = errors
-
-            std[ref] = pd.Series(errors).rolling(window=window_size).std().values
-
-            weights = np.arange(1, len(pred) + 1, dtype=float)
-
-            itv_inf = pred[ref].values()[:, 0] - 1.96 * std[ref] * np.sqrt(weights)
-            itv_sup = pred[ref].values()[:, 0] + 1.96 * std[ref] * np.sqrt(weights)
-
-            df_itv[ref] = list(zip(itv_inf, itv_sup))
-        self.models[model_name]['test_confidence_interval'] = df_itv
+            std_values[ref] = pd.Series(errors).rolling(window=window_size).std().values
         self.models[model_name]['test_residuals'] = df_residuals
+        self.models[model_name]['test_confidence_interval'] = _build_ci(pred, std_values)
 
     def _conf_interval_forecast(self, model_name: str):
-        if model_name not in self.models.keys():
+        if model_name not in self.models:
             raise AttributeError(f'{model_name} has not been fitted.')
-        if 'forecast' not in self.models[model_name].keys():
+        if 'forecast' not in self.models[model_name]:
             raise AttributeError(f'No forecasts have been computed with model {model_name}.')
-
         pred = self.models[model_name]['forecast']
-        df_itv = pd.DataFrame(index=pred.time_index, columns=pred.columns)
-
-        for ref in pred.columns:
-            std = np.std(self.models[model_name]['test_residuals'][ref])
-
-            weights = np.arange(1, len(pred) + 1, dtype=float)
-
-            itv_inf = pred[ref].values()[:, 0] - 1.96 * std * np.sqrt(weights)
-            itv_sup = pred[ref].values()[:, 0] + 1.96 * std * np.sqrt(weights)
-
-            df_itv[ref] = list(zip(itv_inf, itv_sup))
-
-        self.models[model_name]['forecast_confidence_interval'] = df_itv
+        std_values = {ref: np.std(self.models[model_name]['test_residuals'][ref])
+                      for ref in pred.columns}
+        self.models[model_name]['forecast_confidence_interval'] = _build_ci(pred, std_values)
 
     def compute_conf_intervals(self, window_size: int = 10, save=False):
         if not self.models:
             raise AttributeError('No predictions have been found.')
         for model_ in self.models.keys():
             self._conf_interval_test(model_, window_size)
-            if 'forecast' in self.models[model_].keys():
+            if 'forecast' in self.models[model_]:
                 self._conf_interval_forecast(model_)
             if save:
                 joblib.dump(self.models[model_], os.path.join(self.path, f'{model_}_train_jlib'))
-                if 'forecast' in self.models[model_].keys():
+                if 'forecast' in self.models[model_]:
                     joblib.dump(self.models[model_], os.path.join(self.path, f'{model_}_final_jlib'))
 
     def _load_saved_file(self, file: str, filename: str) -> None:
@@ -456,7 +505,7 @@ class Signal(DataCube):
                 self.models[name] = joblib.load(file)
             return
 
-        print(f"File {filename} does not correspond to a saved model.")
+        warnings.warn(f"File {filename} does not correspond to a saved model.")
 
     def get_saved_models(self) -> None:
         """

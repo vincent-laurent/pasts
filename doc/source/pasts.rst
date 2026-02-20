@@ -20,10 +20,10 @@ pasts.model module
    :undoc-members:
    :show-inheritance:
 
-pasts.operations module
+pasts.components module
 -----------------------
 
-.. automodule:: pasts.operations
+.. automodule:: pasts.components
    :members:
    :undoc-members:
    :show-inheritance:
