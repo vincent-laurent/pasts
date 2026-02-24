@@ -24,10 +24,20 @@ class Decomposition:
     def __init__(self, ops: list):
         self._ops = ops
 
-    def compose(self, predicted_residual: DataCube, index=None) -> DataCube:
+    def compose(self, predicted_residual: DataCube, index=None, horizon: int = None) -> DataCube:
         """Reconstruct the signal from a predicted residual.
 
         Walks the operation stack in reverse and applies each inverse.
+
+        Parameters
+        ----------
+        predicted_residual : DataCube
+            The predicted residual values.
+        index : pd.Index, optional
+            Target index. Defaults to the residual's index.
+        horizon : int, optional
+            If positive, components produce future values (forecast mode).
+            If None, components produce historical values.
         """
         idx = index or predicted_residual.data.index
         result = predicted_residual.data.copy()
@@ -38,7 +48,7 @@ class Decomposition:
                 result = inverse(result)
             elif entry[0] == 'binary':
                 _, inverse_op, component = entry
-                values = _to_dataframe(component, idx)
+                values = _to_dataframe(component, idx, horizon=horizon)
                 result = inverse_op(result, values)
 
         return DataCube(result)

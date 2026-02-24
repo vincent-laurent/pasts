@@ -9,53 +9,29 @@
 # See the License for the specific language governing permissions and limitations under the License.
 
 import copy
+import os
 import warnings
 from typing import Union
-import joblib
-import os
-import glob
-import re
 
 import numpy as np
 import pandas as pd
-from darts import TimeSeries
+from pasts.core.base_model import TimeSeriesModel
 from pasts.core.datacube import DataCube
 from pasts.core.decomposition import Decomposition
-from pasts.components.aggregated_model import AggregatedModel, _weighted_aggregate
-from pasts.statistical_tests import TestStatistics
+from pasts.core.model_result import ModelResult
+from pasts.components.darts_model import DartsModel
+from pasts.statistical_tests import StatAccessor
 from pasts.validation import Validation
 from pasts.metrics import Metrics
+from pasts import persistence
+from pasts.visualization import PlotAccessor
 
-# Maps non-stationary test types to their canonical test name (used as dict key)
-_TEST_NAMES = {'seasonality': 'check_seasonality', 'causality': 'grangercausalitytests'}
-
-
-def profiling(data: pd.DataFrame) -> dict:
-    """
-    Finds some properties about time series.
-
-    Parameters
-    ----------
-    data: pd.Dataframe
-        Dataframe of time series with time as index and entities as columns.
-
-    Returns
-    -------
-    Dictionary of properties of passed dataset.
-    """
-    return {'shape': data.shape,
-            'types': data.dtypes,
-            'is_univariate': data.shape[1] == 1,
-            'nanSum': data.isnull().sum(),
-            'quantiles': data.quantile([0, 0.05, 0.50, 0.95, 0.99, 1]).T}
-
-
-def _build_ci(pred, std_values: dict) -> pd.DataFrame:
-    """Build a confidence-interval DataFrame from a predictions TimeSeries and per-column std values."""
-    df_itv = pd.DataFrame(index=pred.time_index, columns=pred.columns)
+def _build_ci(pred: pd.DataFrame, std_values: dict) -> pd.DataFrame:
+    """Build a confidence-interval DataFrame from a predictions DataFrame and per-column std values."""
+    df_itv = pd.DataFrame(index=pred.index, columns=pred.columns)
     weights = np.arange(1, len(pred) + 1, dtype=float)
     for ref in pred.columns:
-        vals = pred[ref].values()[:, 0]
+        vals = pred[ref].values
         itv_inf = vals - 1.96 * std_values[ref] * np.sqrt(weights)
         itv_sup = vals + 1.96 * std_values[ref] * np.sqrt(weights)
         df_itv[ref] = list(zip(itv_inf, itv_sup))
@@ -63,30 +39,25 @@ def _build_ci(pred, std_values: dict) -> pd.DataFrame:
 
 
 class Signal(DataCube):
-    """
-    A class to represent a signal.
+    """A class to represent a signal.
+
+    Combines data storage, decomposition, model fitting, scoring, and
+    forecasting in a single orchestrator.
 
     Attributes
     ----------
     models : dict
-        keys: models applied on the series
-        values: dictionary of predictions and best parameters
-
-    Methods
-    -------
-    apply_stat_test(type_test, test_stat_name = None, *args, **kwargs):
-        Applies statistical test to the univariate or multivariate series.
-    validation_split(timestamp, n_splits_cv = None):
-        Splits the series between train and test sets.
-    apply_model(model, gridsearch = False, parameters = None):
-        Applies statistical, machine learning of deep learning model to the series.
-    compute_scores(list_metrics: list[str] = None, axis=1)
-        Computes scores of models on test data.
-    apply_aggregated_model(list_models, refit=False)
-        Aggregates a given list of models according to their performance on test data.
-    forecast(model_name: str, horizon: int)
-        Generates forecasts for future dates.
+        keys: model names, values: :class:`ModelResult` instances.
     """
+
+    @staticmethod
+    def _profiling(data: pd.DataFrame) -> dict:
+        """Compute basic properties of the time series."""
+        return {'shape': data.shape,
+                'types': data.dtypes,
+                'is_univariate': data.shape[1] == 1,
+                'nanSum': data.isnull().sum(),
+                'quantiles': data.quantile([0, 0.05, 0.50, 0.95, 0.99, 1]).T}
 
     def __init__(self, data: pd.DataFrame, path: str = None):
         """
@@ -106,63 +77,111 @@ class Signal(DataCube):
             os.makedirs(path)
         self.path = path
         super().__init__(data)
-        self.__properties = profiling(data)
-        self.__tests_stat = {}
-        self.__train_data = None
-        self.__test_data = None
+        self._properties = Signal._profiling(data)
+        self._tests_stat = {}
+        self._train_data = None
+        self._test_data = None
         self.models = {}
-        self.__performance_models = {}
+        self._performance_models = {}
         self._residual = None
-
-    @property
-    def rest_data(self):
-        """Residual data: residual if decomposition exists, otherwise raw data."""
-        if self._residual is not None:
-            return self._residual.data
-        return self.data
+        self._learned_model = None
 
     @property
     def train_data(self):
         """Train set as a pandas dataframe"""
-        return self.__train_data
+        return self._train_data
 
     @property
     def test_data(self):
         """Test set as a pandas dataframe"""
-        return self.__test_data
-
-    @property
-    def rest_train_data(self):
-        """Residual train data: residual if decomposition exists, otherwise train data."""
-        if self._residual is not None:
-            return self._residual.data.reindex(self.__train_data.index).dropna()
-        return self.__train_data
+        return self._test_data
 
     @property
     def properties(self):
         """Dictionary of properties of the signal"""
-        return self.__properties
+        return self._properties
 
     @property
     def tests_stat(self):
         """Dictionary of statistical tests applied on data"""
-        return self.__tests_stat
+        return self._tests_stat
 
     @property
     def performance_models(self):
         """Dictionary containing a maximum of 2 other dictionaries for unit-wise or time-wise scores. Dictionaries
         contain a dataframe for each scorer, with scores computed for all models."""
-        return self.__performance_models
+        return self._performance_models
+
+    def handle_nan(self, method: str = "drop", **kwargs) -> None:
+        """Remove or fill NaN values in the signal data (in place).
+
+        Parameters
+        ----------
+        method : str
+            ``"drop"`` — drop rows containing any NaN (default).
+            ``"fill"`` — fill NaN with a value (default 0, override via *value=…*).
+            ``"interpolate"`` — ``pandas.DataFrame.interpolate`` + bfill + ffill.
+        **kwargs
+            Passed to the underlying pandas method (e.g. ``value=0`` for
+            ``"fill"``, ``method='linear'`` for ``"interpolate"``).
+        """
+        if method == "drop":
+            self._data = self._data.dropna(**kwargs)
+        elif method == "fill":
+            self._data = self._data.fillna(kwargs.pop("value", 0), **kwargs)
+        elif method == "interpolate":
+            self._data = self._data.interpolate(**kwargs).bfill().ffill()
+        else:
+            raise ValueError(
+                f"Unknown method {method!r}. Use 'drop', 'fill', or 'interpolate'."
+            )
+        self._properties = Signal._profiling(self._data)
+        if self._train_data is not None or self._test_data is not None:
+            self._train_data = None
+            self._test_data = None
+            warnings.warn(
+                "Train/test split has been reset after handle_nan(). "
+                "Call validation_split() again.",
+                UserWarning,
+            )
 
     def decompose(self) -> None:
         """Initialize the residual as a copy of the signal data.
 
         After calling this method, operate on ``signal.residual`` to build
-        the decomposition (e.g. ``signal.residual -= Trend().fit(signal.data)``).
+        the decomposition (e.g. ``signal.residual -= LinearTrend().fit(signal.data)``).
         The residual is itself a :class:`Signal`, so all analysis methods
         (``apply_model``, ``validation_split``, etc.) can be used on it directly.
         """
         self._residual = Signal(self.data.copy())
+
+    @property
+    def plot(self) -> PlotAccessor:
+        """Accessor for visualization methods.
+
+        Usage::
+
+            signal.plot()                              # raw signal
+            signal.plot.acf()                          # autocorrelation
+            signal.plot.predictions()                  # predictions (matplotlib)
+            signal.plot.predictions(backend="plotly")  # predictions (plotly)
+            signal.plot.forecast()                     # forecast (matplotlib)
+            signal.plot.forecast(backend="plotly")     # forecast (plotly)
+        """
+        return PlotAccessor(self)
+
+    @property
+    def stat(self) -> StatAccessor:
+        """Accessor for statistical tests.
+
+        Usage::
+
+            signal.stat.test_stationarity()               # ADF per column
+            signal.stat.test_stationarity(method='kpss')   # KPSS per column
+            signal.stat.test_seasonality()                 # per column
+            signal.stat.test_causality()                   # all column pairs
+        """
+        return StatAccessor(self)
 
     @property
     def residual(self) -> "Signal":
@@ -180,31 +199,38 @@ class Signal(DataCube):
             raise AttributeError("No decomposition. Call decompose() first.")
         return Decomposition(self._residual._ops)
 
-    def apply_stat_test(self, type_test: str, test_stat_name: str = None, *args, **kwargs) -> None:
-        """
-        Applies statistical test to the univariate or multivariate series.
+    @staticmethod
+    def _check_nan_for_model(data: pd.DataFrame, model: "TimeSeriesModel", context: str) -> None:
+        """Raise ValueError if *data* has NaN and *model* is not nan_safe."""
+        if data.isna().any().any() and not model.nan_safe:
+            n_nan = int(data.isna().sum().sum())
+            cols = list(data.columns[data.isna().any()])
+            raise ValueError(
+                f"Cannot {context} model '{model.name}': data contains {n_nan} "
+                f"NaN value(s) in column(s) {cols}. "
+                f"{model.name} does not support NaN (nan_safe=False). "
+                f"Handle missing values before fitting "
+                f"(e.g. df.fillna(), df.dropna(), df.interpolate())."
+            )
 
-        Fills the attribute tests_stat.
+    def learn(self, model: object) -> None:
+        """Fit a forecasting model on this signal's data.
+
+        Intended for the terminal step of a decomposition workflow:
+        after stripping components from the residual, fit a model that
+        will predict the residual.
 
         Parameters
         ----------
-        type_test : str
-                Type of test to be applied: stationary or seasonality for univariate series, causality for multivariate
-        test_stat_name : str, optional
-                adfuller or kpss if type_test is stationary (default is adfuller)
-                ignored if type_test is seasonality or causality
-
-        Returns
-        -------
-        None
+        model : TimeSeriesModel or raw Darts model
+            The model to fit. Raw Darts models are auto-wrapped in DartsModel.
         """
-        call_test = TestStatistics(self)
-        if type_test == 'stationary' and test_stat_name is None:
-            test_stat_name = 'adfuller'
-        elif type_test != 'stationary':
-            test_stat_name = _TEST_NAMES[type_test]
-        self.tests_stat[f"{type_test}: {test_stat_name}"] = call_test.apply(type_test, test_stat_name,
-                                                                            *args, **kwargs)
+        if not isinstance(model, TimeSeriesModel):
+            model = DartsModel(model)
+        model = copy.deepcopy(model)
+        self._check_nan_for_model(self.data, model, "learn")
+        model.fit(self.data)
+        self._learned_model = model
 
     def validation_split(self, timestamp: Union[int, str, pd.Timestamp], n_splits_cv=None) -> None:
         """
@@ -212,7 +238,7 @@ class Signal(DataCube):
 
         If n_splits_cv is filled, yields train and test indices for cross-validation.
 
-        Fills the attributes train_data, test_data and rest_train_data (with train_data per default)
+        Fills the attributes train_data and test_data.
 
         Parameters
         ----------
@@ -229,8 +255,8 @@ class Signal(DataCube):
         call_validation.split_cv(timestamp, n_splits_cv)
         if call_validation.train_data.shape[0] < 2:
             raise ValueError("Train set is empty or too small.")
-        self.__train_data = call_validation.train_data
-        self.__test_data = call_validation.test_data
+        self._train_data = call_validation.train_data
+        self._test_data = call_validation.test_data
 
     def apply_model(self,
                     model: object,
@@ -238,34 +264,39 @@ class Signal(DataCube):
                     parameters: dict = None,
                     save_model: bool = False) -> None:
         """
-        Applies statistical, machine learning of deep learning model to the series.
+        Applies a model to the series.
+
+        Accepts any :class:`TimeSeriesModel` instance (``DartsModel``, ``LinearTrend``,
+        ``AggregatedModel``, …) or a raw Darts model (auto-wrapped in ``DartsModel``).
 
         Fills the attribute models.
 
         Parameters
         ----------
         model
-                Instance of a model from darts. Will be refitted even if it has already been.
+                Instance of a TimeSeriesModel or a raw Darts model.
         gridsearch : bool, optional
-                Whether to perform a gridsearch (default is False)
+                Whether to perform a gridsearch (default is False). Only for Darts models.
         parameters : dict, optional
                 Parameters to test if a gridsearch is performed (default is None)
         save_model : bool, optional
                 Whether to save the model in a file in Signal.path (default is False).
-                When True, also saves data, train and test set, and transformed data (if it exists).
-                If the same model with different parameters has previously been saved from the same Signal object,
-                the file will be overwritten.
 
         Returns
         -------
         None
         """
-        self.models[model.__class__.__name__] = self._fit_and_predict(copy.deepcopy(model), gridsearch, parameters)
+        if not isinstance(model, TimeSeriesModel):
+            if gridsearch and parameters is None:
+                raise ValueError("Please enter the parameters")
+            gridsearch_params = parameters if gridsearch else None
+            model = DartsModel(model, gridsearch_params=gridsearch_params)
+
+        model = copy.deepcopy(model)
+        self.models[model.name] = self._fit_and_predict(model)
         if save_model:
-            joblib.dump(self.models[model.__class__.__name__], os.path.join(self.path,
-                                                                            f'{model.__class__.__name__}_train_jlib'))
-            joblib.dump(self.test_data, os.path.join(self.path, 'test_data_jlib'))
-            joblib.dump(self.train_data, os.path.join(self.path, 'train_data_jlib'))
+            persistence.save_model(self.path, model.name, self.models[model.name])
+            persistence.save_common_data(self.path, self.train_data, self.test_data)
 
     def compute_scores(self, list_metrics: list[str] = None, axis=1) -> None:
         """
@@ -297,223 +328,119 @@ class Signal(DataCube):
             self.models[model]['scores'][score_type] = call_metric.compute_scores(model, axis)
         self.performance_models[score_type] = call_metric.scores_comparison(axis)
 
-    def apply_aggregated_model(self, list_models: list[object], refit: bool = False, save_model: bool = False) -> None:
-        """
-        Aggregates a given list of models according to their performance on test data.
-
-        Creates a new model "AggregatedModel" in the attribute models.
-
-        Parameters
-        ----------
-        list_models :
-                List of instances of models.
-        refit : bool, optional
-                Whether to refit estimators even if they were previously fitted (default is False).
-                Ignored for estimators not previously fitted.
-        save_model : bool, optional
-                Whether to save the model in a file in Signal.path (default is False).
-                When True, also saves data, train and test set, and transformed data (if it exists).
-                If the same model with different parameters has previously been saved from the same Signal object,
-                the file will be overwritten.
-
-        Returns
-        -------
-        None
-        """
-        dict_models = {model.__class__.__name__: model for model in list_models}
-        if refit:
-            for model in dict_models.values():
-                self.apply_model(model)
-        else:
-            for model_name, model in dict_models.items():
-                if model_name not in self.models:
-                    warnings.warn(f'{model_name} has not yet been fitted. Fitting {model_name}...')
-                    self.apply_model(model)
-                    if save_model:
-                        joblib.dump(self.models[model_name], os.path.join(self.path, f'{model_name}_train_jlib'))
-        predictions = {
-            m: self.models[m]['predictions'].to_dataframe().copy()
-            for m in dict_models
-        }
-        weights = AggregatedModel.compute_weights(predictions, self.test_data.copy())
-        df_ag = _weighted_aggregate(predictions, weights)
-        self.models['AggregatedModel'] = {
-            'predictions': TimeSeries.from_dataframe(df_ag),
-            'weights': weights,
-            'models': dict_models,
-            'scores': {'unit_wise': {}, 'time_wise': {}},
-        }
-        if save_model:
-            joblib.dump(self.models['AggregatedModel'], os.path.join(self.path, 'AggregatedModel_train_jlib'))
-            joblib.dump(self.test_data, os.path.join(self.path, 'test_data_jlib'))
-            joblib.dump(self.train_data, os.path.join(self.path, 'train_data_jlib'))
-
-    def _fit_and_predict(self, model, gridsearch=False, parameters=None) -> dict:
-        """Fit a Darts model on train data and predict on test set."""
-        train_tseries = TimeSeries.from_dataframe(self.rest_train_data)
-        if gridsearch:
-            if parameters is None:
-                raise ValueError("Please enter the parameters")
-            print('Performing the gridsearch for', model.__class__.__name__, '...')
-            best_model, best_parameters, _ = model.gridsearch(
-                parameters=parameters, series=train_tseries,
-                start=0.5, forecast_horizon=5
-            )
-            model = best_model
-        else:
-            best_parameters = "default"
-
-        model.fit(train_tseries)
-        forecast = model.predict(len(self.test_data))
-        if self._residual is not None:
-            forecast = TimeSeries.from_dataframe(
-                self.decomposition.compose(DataCube(forecast.to_dataframe())).data
-            )
-        return {
-            'predictions': forecast,
-            'best_parameters': best_parameters,
-            'scores': {'unit_wise': {}, 'time_wise': {}},
-            'estimator': model,
-        }
-
-    def _fit_on_full_data(self, model_name: str):
-        """Refit model on full dataset. Requires prior fit on train set."""
-        if model_name not in self.models:
-            raise AttributeError(f'{model_name} has not been fitted.')
-        model = self.models[model_name]['estimator']
-        train_temp = TimeSeries.from_dataframe(self.rest_data)
-        model.fit(train_temp)
-        return model
+    def _fit_and_predict(self, model: TimeSeriesModel) -> ModelResult:
+        """Fit a TimeSeriesModel on train data and predict on test set."""
+        self._check_nan_for_model(self.train_data, model, "fit")
+        model.fit(self.train_data)
+        predictions = model.reverse_transform(len(self.test_data))
+        # Align prediction index with test_data to avoid index mismatch
+        # (e.g. Darts may produce slightly different DatetimeIndex values)
+        if len(predictions) == len(self.test_data):
+            predictions.index = self.test_data.index
+        return ModelResult(
+            model=model,
+            predictions=predictions,
+            best_parameters=getattr(model, 'best_params_', None) or "default",
+        )
 
     def _ensure_final_estimator(self, model_name: str) -> None:
-        if 'final_estimator' not in self.models[model_name]:
+        """Lazily refit the model on the full dataset for forecasting."""
+        result = self.models[model_name]
+        if result.final_estimator is None:
+            self._check_nan_for_model(self.data, result.model, "refit")
             warnings.warn(f"Fitting model {model_name} on whole dataset...")
-            self.models[model_name]['final_estimator'] = self._fit_on_full_data(model_name)
+            result.final_estimator = copy.deepcopy(result.model)
+            result.final_estimator.fit(self.data)
 
-    def _save_common_data(self) -> None:
-        joblib.dump(self.test_data, os.path.join(self.path, 'test_data_jlib'))
-        joblib.dump(self.train_data, os.path.join(self.path, 'train_data_jlib'))
-
-    def forecast(self, model_name: str, horizon: int, save_model: bool = False) -> None:
+    def forecast(self, model_name: str = None, horizon: int = None, save_model: bool = False) -> None:
         """
         Generates forecasts for future dates.
 
-        Fills models attribute with a 'forecast' key and a 'final estimator' key.
+        Fills models attribute with a 'forecast' key and a 'final_estimator' key.
 
         Parameters
         ----------
-        model_name : str
-                Name of a model. If AggregatedModel, forecasts will be computed with the models included in the
-                aggregation.
+        model_name : str, optional
+                Name of a model previously fitted via apply_model(). If None and a
+                model has been learned on the residual (via ``residual.learn()``),
+                that model is used automatically with decomposition recomposition.
         horizon : int
                 Horizon of prediction.
         save_model : bool, optional
                 Whether to save the model in a file in Signal.path (default is False).
-                When True, also saves data, train and test set, and transformed data (if it exists).
-                If the same model with different parameters has previously been saved from the same Signal object,
-                the file will be overwritten.
 
         Returns
         -------
         None
         """
-        if model_name != 'AggregatedModel':
-            if model_name not in self.models:
-                raise ValueError(f'{model_name} has not been trained.')
-            self._ensure_final_estimator(model_name)
-            self.models[model_name]['forecast'] = self.models[model_name]['final_estimator'].predict(horizon)
-            if save_model:
-                joblib.dump(self.models[model_name], os.path.join(self.path, f'{model_name}_final_jlib'))
-                self._save_common_data()
+        # --- Decomposition path: model learned on the residual ---
+        if model_name is None:
+            if (self._residual is None
+                    or self._residual._learned_model is None):
+                raise ValueError(
+                    "No model_name provided and no model has been "
+                    "learned on the residual. Call residual.learn() first.")
+            model = self._residual._learned_model
+            forecast_df = model.reverse_transform(horizon)
+            forecast_df = self.decomposition.compose(
+                DataCube(forecast_df), horizon=horizon).data
+            learned_name = model.name
+            if learned_name not in self.models:
+                self.models[learned_name] = ModelResult(model=model)
+            self.models[learned_name].forecast = forecast_df
             return
 
-        if 'AggregatedModel' not in self.models:
-            raise ValueError('Aggregated Model has not been trained. Use method apply_aggregated_model first.')
-        for model in self.models['AggregatedModel']['models']:
-            self._ensure_final_estimator(model)
-            self.models[model]['forecast'] = self.models[model]['final_estimator'].predict(horizon)
-            if save_model:
-                joblib.dump(self.models[model], os.path.join(self.path, f'{model}_final_jlib'))
-
-        dict_models = self.models['AggregatedModel']['models']
-        weights = self.models['AggregatedModel']['weights']
-        forecast_predictions = {
-            m: self.models[m]['forecast'].to_dataframe()
-            for m in dict_models
-        }
-        self.models['AggregatedModel']['forecast'] = TimeSeries.from_dataframe(
-            _weighted_aggregate(forecast_predictions, weights)
-        )
+        # --- Direct path (uniform for all models including AggregatedModel) ---
+        if model_name not in self.models:
+            raise ValueError(f'{model_name} has not been trained.')
+        self._ensure_final_estimator(model_name)
+        result = self.models[model_name]
+        result.forecast = result.final_estimator.reverse_transform(horizon)
         if save_model:
-            joblib.dump(self.models['AggregatedModel'], os.path.join(self.path, 'AggregatedModel_final_jlib'))
-            self._save_common_data()
+            persistence.save_model(self.path, model_name, result, suffix="final")
+            persistence.save_common_data(self.path, self.train_data, self.test_data)
 
     def _conf_interval_test(self, model_name: str, window_size: int = 6):
         if model_name not in self.models:
             raise AttributeError(f'{model_name} has not been fitted.')
-        pred = self.models[model_name]['predictions']
-        df_residuals = pd.DataFrame(index=pred.time_index, columns=pred.columns)
+        result = self.models[model_name]
+        pred = result.predictions
+        df_residuals = pd.DataFrame(index=pred.index, columns=pred.columns)
         std_values = {}
         for ref in pred.columns:
-            errors = self.test_data[ref].values - pred[ref].values()[:, 0]
+            errors = self.test_data[ref].values - pred[ref].values
             df_residuals[ref] = errors
             std_values[ref] = pd.Series(errors).rolling(window=window_size).std().values
-        self.models[model_name]['test_residuals'] = df_residuals
-        self.models[model_name]['test_confidence_interval'] = _build_ci(pred, std_values)
+        result.test_residuals = df_residuals
+        result.test_confidence_interval = _build_ci(pred, std_values)
 
     def _conf_interval_forecast(self, model_name: str):
         if model_name not in self.models:
             raise AttributeError(f'{model_name} has not been fitted.')
-        if 'forecast' not in self.models[model_name]:
+        result = self.models[model_name]
+        if result.forecast is None:
             raise AttributeError(f'No forecasts have been computed with model {model_name}.')
-        pred = self.models[model_name]['forecast']
-        std_values = {ref: np.std(self.models[model_name]['test_residuals'][ref])
+        pred = result.forecast
+        std_values = {ref: np.std(result.test_residuals[ref])
                       for ref in pred.columns}
-        self.models[model_name]['forecast_confidence_interval'] = _build_ci(pred, std_values)
+        result.forecast_confidence_interval = _build_ci(pred, std_values)
 
     def compute_conf_intervals(self, window_size: int = 10, save=False):
         if not self.models:
             raise AttributeError('No predictions have been found.')
         for model_ in self.models.keys():
             self._conf_interval_test(model_, window_size)
-            if 'forecast' in self.models[model_]:
+            if self.models[model_].forecast is not None:
                 self._conf_interval_forecast(model_)
             if save:
-                joblib.dump(self.models[model_], os.path.join(self.path, f'{model_}_train_jlib'))
-                if 'forecast' in self.models[model_]:
-                    joblib.dump(self.models[model_], os.path.join(self.path, f'{model_}_final_jlib'))
-
-    def _load_saved_file(self, file: str, filename: str) -> None:
-        match_data = re.search(r'(.+)_data_jlib', filename)
-        if match_data:
-            name = match_data.group(1)
-            if name == 'test':
-                self.__test_data = joblib.load(file)
-            elif name == 'train':
-                self.__train_data = joblib.load(file)
-            return
-
-        match_final = re.search(r'(.+)_final_jlib', filename)
-        if match_final:
-            self.models[match_final.group(1)] = joblib.load(file)
-            return
-
-        match_train = re.search(r'(.+)_train_jlib', filename)
-        if match_train:
-            name = match_train.group(1)
-            if name not in self.models or 'forecast' not in self.models[name]:
-                self.models[name] = joblib.load(file)
-            return
-
-        warnings.warn(f"File {filename} does not correspond to a saved model.")
+                persistence.save_model(self.path, model_, self.models[model_])
+                if self.models[model_].forecast is not None:
+                    persistence.save_model(self.path, model_, self.models[model_], suffix="final")
 
     def get_saved_models(self) -> None:
-        """
-        Gets previously fitted models saved in joblib files in Signal.path and saves them in attribute models.
-        """
-        files = glob.glob(os.path.join(self.path, "*jlib"))
-        if not files:
-            warnings.warn("No saved models were found.")
-            return
-        for file in files:
-            self._load_saved_file(file, os.path.basename(file))
+        """Gets previously fitted models saved in joblib files in Signal.path and saves them in attribute models."""
+        def set_train(data):
+            self._train_data = data
+        def set_test(data):
+            self._test_data = data
+        persistence.load_saved_models(self.path, self.models, set_train, set_test)

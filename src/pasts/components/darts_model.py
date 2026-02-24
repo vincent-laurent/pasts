@@ -14,7 +14,7 @@ from pasts.core.base_model import TimeSeriesModel
 class DartsModel(TimeSeriesModel):
     """A time series model backed by a Darts ML/DL estimator.
 
-    Unlike :class:`~pasts.components.parametric_model.ParametricModel`,
+    Unlike parametric trend components (e.g. :class:`~pasts.components.trend.LinearTrend`),
     a ``DartsModel`` learns patterns from data rather than fitting a
     closed-form function of time.  It can be applied to any
     :class:`~pasts.core.datacube.DataCube` or ``pd.DataFrame`` —
@@ -25,6 +25,10 @@ class DartsModel(TimeSeriesModel):
     model : darts.models base class instance
         Any fitted or unfitted Darts model
         (e.g. ``NaiveSeasonal()``, ``ExponentialSmoothing()``).
+    gridsearch_params : dict, optional
+        Parameter grid for gridsearch. When provided, :meth:`fit` runs
+        ``model.gridsearch(...)`` before the normal fit. The best
+        parameters are stored in :attr:`best_params_`.
 
     Notes
     -----
@@ -33,8 +37,15 @@ class DartsModel(TimeSeriesModel):
     retrieve the |i| last in-sample one-step-ahead predictions.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, gridsearch_params=None):
         self._model = model
+        self._gridsearch_params = gridsearch_params
+        self.best_params_ = None
+
+    @property
+    def name(self) -> str:
+        """Return the wrapped Darts model's class name."""
+        return self._model.__class__.__name__
 
     def fit(self, X) -> "DartsModel":
         """Fit the Darts model on *X*.
@@ -51,8 +62,25 @@ class DartsModel(TimeSeriesModel):
         from pasts.core.datacube import DataCube
         if isinstance(X, DataCube):
             X = X.data
+        if X.isna().any().any():
+            n_nan = int(X.isna().sum().sum())
+            cols = list(X.columns[X.isna().any()])
+            raise ValueError(
+                f"Training data contains {n_nan} NaN value(s) in column(s) {cols}. "
+                f"Handle missing values before fitting (e.g. df.fillna(0), df.dropna(), "
+                f"df.interpolate())."
+            )
         from darts import TimeSeries
         self._train_series = TimeSeries.from_dataframe(X)
+        if self._gridsearch_params:
+            print('Performing the gridsearch for', self.name, '...')
+            best_model, self.best_params_, _ = self._model.gridsearch(
+                parameters=self._gridsearch_params,
+                series=self._train_series,
+                start=0.5,
+                forecast_horizon=5,
+            )
+            self._model = best_model
         self._model.fit(self._train_series)
         self._n_train = len(self._train_series)
         return self

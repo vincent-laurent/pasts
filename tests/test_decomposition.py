@@ -4,7 +4,7 @@ import pytest
 
 from pasts.core.datacube import DataCube, _to_dataframe
 from pasts.core.decomposition import Decomposition
-from pasts.components import Trend
+from pasts.components import LinearTrend
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ class TestDecompositionCompose:
         """signal -= T; signal /= alpha  →  roundtrip."""
         original = simple_df.copy()
         r = DataCube(simple_df.copy())
-        trend = Trend().fit(simple_df)
+        trend = LinearTrend().fit(simple_df)
         r -= trend
         r /= alpha_dc
         decomp = Decomposition(r._ops)
@@ -158,12 +158,12 @@ class TestDecompositionRepr:
 
     def test_repr_simple(self, simple_df):
         r = DataCube(simple_df.copy())
-        trend = Trend().fit(simple_df)
+        trend = LinearTrend().fit(simple_df)
         r -= trend
         decomp = Decomposition(r._ops)
         text = repr(decomp)
         assert "residual" in text
-        assert "Trend" in text
+        assert "LinearTrend" in text
 
     def test_repr_with_unary(self, simple_df):
         r = DataCube(simple_df.copy())
@@ -186,7 +186,7 @@ class TestDecompositionComponents:
 
     def test_components_list(self, simple_df, alpha_dc):
         r = DataCube(simple_df.copy())
-        trend = Trend().fit(simple_df)
+        trend = LinearTrend().fit(simple_df)
         r -= trend
         r /= alpha_dc
         decomp = Decomposition(r._ops)
@@ -208,7 +208,7 @@ class TestToDataframe:
         pd.testing.assert_frame_equal(result, simple_df)
 
     def test_fitter(self, simple_df):
-        trend = Trend().fit(simple_df)
+        trend = LinearTrend().fit(simple_df)
         result = _to_dataframe(trend, simple_df.index)
         assert isinstance(result, pd.DataFrame)
         assert len(result) == len(simple_df)
@@ -280,7 +280,7 @@ class TestSignalDecomposition:
         from pasts.signal import Signal
         signal = Signal(simple_df, path=str(tmp_path))
         signal.decompose()
-        trend = Trend().fit(simple_df)
+        trend = LinearTrend().fit(simple_df)
         signal.residual -= trend
         decomp = signal.decomposition
         assert isinstance(decomp, Decomposition)
@@ -296,7 +296,7 @@ class TestSignalDecomposition:
         from pasts.signal import Signal
         signal = Signal(simple_df, path=str(tmp_path))
         signal.decompose()
-        trend = Trend().fit(simple_df)
+        trend = LinearTrend().fit(simple_df)
         signal.residual -= trend
         signal.residual /= 2
         R = DataCube(signal.residual.data.copy())

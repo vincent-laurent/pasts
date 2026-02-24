@@ -28,9 +28,11 @@ import numpy as np
 import pandas as pd
 from darts.models import ExponentialSmoothing, RandomForest
 
+from matplotlib import pyplot as plt
+
 from pasts.signal import Signal
-from pasts.components import Trend
-from pasts.visualization import Visualization
+from pasts.components import LinearTrend
+from pasts.components.aggregated_model import AggregatedModel
 
 warnings.filterwarnings("ignore")
 
@@ -117,7 +119,7 @@ def run_scenario_store_level():
 
 
     # Statistical tests
-    signal.apply_stat_test("stationary")
+    signal.stat.test_stationarity()
 
 
     # Validation split: last 2 months as test
@@ -126,7 +128,7 @@ def run_scenario_store_level():
 
     # Decomposition: remove trend
     signal.decompose()
-    signal.residual -= Trend().fit(signal.data)
+    signal.residual -= LinearTrend().fit(signal.data)
     signal.data["store_53"].plot()
     
 
@@ -143,17 +145,18 @@ def run_scenario_store_level():
         print(f"    {metric}:\n{df_score}")
 
     # Aggregated model
-    signal.apply_aggregated_model(
-        [ExponentialSmoothing(), RandomForest(lags=30)]
-    )
+    signal.apply_model(AggregatedModel(
+        {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=30)},
+        test_data=signal.test_data,
+    ))
     signal.compute_scores(axis=1)
     signal.compute_conf_intervals(window_size=7)
 
     # Forecast
     signal.forecast("AggregatedModel", horizon=30)
     signal.compute_conf_intervals(window_size=7)
-    Visualization(signal).show_predictions(display=False)
-    Visualization(signal).show_forecast(display=False)
+    plt.close(signal.plot.predictions())
+    plt.close(signal.plot.forecast())
     print(_MSG_DONE)
     return signal
 
@@ -192,7 +195,7 @@ def run_scenario_family_store():
     signal.validation_split(timestamp=timestamp)
 
     signal.decompose()
-    signal.residual -= Trend().fit(signal.data)
+    signal.residual -= LinearTrend().fit(signal.data)
 
     print(_MSG_FIT_ES)
     signal.apply_model(ExponentialSmoothing())
@@ -204,16 +207,17 @@ def run_scenario_family_store():
     for metric, df_score in signal.performance_models.get("unit_wise", {}).items():
         print(f"    {metric}:\n{df_score}")
 
-    signal.apply_aggregated_model(
-        [ExponentialSmoothing(), RandomForest(lags=14)]
-    )
+    signal.apply_model(AggregatedModel(
+        {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=14)},
+        test_data=signal.test_data,
+    ))
     signal.compute_scores(axis=1)
     signal.compute_conf_intervals(window_size=7)
-    Visualization(signal).show_predictions(display=False)
+    plt.close(signal.plot.predictions())
 
     signal.forecast("AggregatedModel", horizon=28)
     signal.compute_conf_intervals(window_size=7)
-    Visualization(signal).show_forecast(display=False)
+    plt.close(signal.plot.forecast())
     print(_MSG_DONE)
     return signal
 
@@ -288,14 +292,14 @@ def run_scenario_curated_items():
 
     signal = Signal(df, path=os.path.join(OUTPUT_DIR, "curated_items"))
     print(f"  Properties: {signal.properties['shape']}")
-    Visualization(signal).plot_signal(display=False)
+    plt.close(signal.plot())
 
     timestamp = str(df.index[-1] - pd.Timedelta(days=45))[:10]
     print(f"  Validation split at {timestamp}")
     signal.validation_split(timestamp=timestamp)
 
     signal.decompose()
-    signal.residual -= Trend().fit(signal.data)
+    signal.residual -= LinearTrend().fit(signal.data)
 
     print(_MSG_FIT_ES)
     signal.apply_model(ExponentialSmoothing())
@@ -307,16 +311,17 @@ def run_scenario_curated_items():
     for metric, df_score in signal.performance_models.get("unit_wise", {}).items():
         print(f"    {metric}:\n{df_score}")
 
-    signal.apply_aggregated_model(
-        [ExponentialSmoothing(), RandomForest(lags=14)]
-    )
+    signal.apply_model(AggregatedModel(
+        {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=14)},
+        test_data=signal.test_data,
+    ))
     signal.compute_scores(axis=1)
     signal.compute_conf_intervals(window_size=7)
-    Visualization(signal).show_predictions(display=False)
+    plt.close(signal.plot.predictions())
 
     signal.forecast("AggregatedModel", horizon=28)
     signal.compute_conf_intervals(window_size=7)
-    Visualization(signal).show_forecast(display=False)
+    plt.close(signal.plot.forecast())
     print(_MSG_DONE)
     return signal
 
@@ -356,7 +361,7 @@ def run_scenario_scale_test(n_items=50):
     signal.validation_split(timestamp=timestamp)
 
     signal.decompose()
-    signal.residual -= Trend().fit(signal.data)
+    signal.residual -= LinearTrend().fit(signal.data)
 
     print(_MSG_FIT_ES)
     t0 = time.time()
@@ -376,9 +381,10 @@ def run_scenario_scale_test(n_items=50):
         print(f"    ExponentialSmoothing: mean={rmse_df['ExponentialSmoothing'].mean():.2f}")
         print(f"    RandomForest:        mean={rmse_df['RandomForest'].mean():.2f}")
 
-    signal.apply_aggregated_model(
-        [ExponentialSmoothing(), RandomForest(lags=14)]
-    )
+    signal.apply_model(AggregatedModel(
+        {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=14)},
+        test_data=signal.test_data,
+    ))
     signal.compute_scores(axis=1)
 
     signal.forecast("AggregatedModel", horizon=14)

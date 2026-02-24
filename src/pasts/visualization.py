@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import random
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 import matplotlib
+import matplotlib.figure
 import pandas as pd
 from matplotlib import pyplot as plt
 from pandas.plotting import autocorrelation_plot
@@ -53,127 +54,171 @@ def _confidence_bounds(itv_series) -> pd.DataFrame:
 
 
 def _ts_to_df(model_entry: dict, key: str) -> pd.DataFrame:
-    ts = model_entry[key]
-    return pd.DataFrame(ts.values(), columns=ts.columns, index=ts.time_index)
+    return model_entry[key]
 
 
-class Visualization:
-    """
-    A class to visualize signals.
+class PlotAccessor:
+    """Accessor for Signal.plot that provides a fluent plotting API.
 
-    Attributes
-    ----------
-    __signal : Signal
+    All methods return the figure object (matplotlib or plotly).
 
-    Methods
-    -------
-    plot_signal():
-        Plots raw data and transformed data if operations have been applied.
-    plot_smoothing(resample_size, window_size):
-        Plots resampled data.
-    acf_plot():
-        Plots autocorrelation (only for univariate series).
-    show_predictions():
-        Plots raw data and predicted values on same graph.
-    show_forecast():
-        Plots raw data and forecasted values (for future dates) on same graph.
-
-    See also
-    --------
-    pasts.signal for details on the Signal object.
-    pasts.components for details on time series components.
-    pasts.model for details on predictions and forecast methods.
+    Usage
+    -----
+        signal.plot()                              # raw signal
+        signal.plot.acf()                          # autocorrelation
+        signal.plot.predictions()                  # predictions (matplotlib)
+        signal.plot.predictions(backend="plotly")  # predictions (plotly)
+        signal.plot.forecast()                     # forecast (matplotlib)
+        signal.plot.forecast(backend="plotly")     # forecast (plotly)
     """
 
     def __init__(self, signal: Signal):
-        self.__signal = signal
+        self._signal = signal
 
-    def plot_signal(self, display=True, **kwargs) -> None:
-        """Plots raw data and transformed data if operations have been applied."""
-        _, ax = plt.subplots()
+    def __call__(self, **kwargs) -> matplotlib.figure.Figure:
+        """Plot raw data and transformed data if operations have been applied.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        fig, ax = plt.subplots()
         legend = []
-        self.__signal.data.plot(ax=ax, **kwargs)
-        for col in self.__signal.data.columns:
+        self._signal.data.plot(ax=ax, **kwargs)
+        for col in self._signal.data.columns:
             legend.append(f'raw data: {col}')
-        if self.__signal._residual is not None:
-            self.__signal.rest_data.plot(ax=ax, **kwargs)
-            for col in self.__signal.rest_data.columns:
+        if self._signal._residual is not None:
+            self._signal.residual.data.plot(ax=ax, **kwargs)
+            for col in self._signal.residual.data.columns:
                 legend.append(f'residual: {col}')
-            plt.title(f'Decomposition: {self.__signal.decomposition}',
-                      fontdict={'fontsize': 10})
-        plt.legend(legend)
-        if display:
-            plt.show()
-        else:
-            plt.close()
+            ax.set_title(f'Decomposition: {self._signal.decomposition}',
+                         fontsize=10)
+        ax.legend(legend)
+        return fig
 
-    def acf_plot(self) -> None:
-        """Plots autocorrelation (only for univariate series)."""
-        if not self.__signal.properties['is_univariate']:
+    def acf(self) -> matplotlib.figure.Figure:
+        """Plot autocorrelation (only for univariate series).
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        if not self._signal.properties['is_univariate']:
             raise ValueError('Can only plot acf for univariate series')
-        autocorrelation_plot(self.__signal.data)
+        fig, ax = plt.subplots()
+        autocorrelation_plot(self._signal.data, ax=ax)
+        return fig
+
+    def predictions(self, aggregated_only: bool = False,
+                    backend: str = "matplotlib"
+                    ) -> Union[matplotlib.figure.Figure, go.Figure]:
+        """Plot raw data and predicted values on same graph.
+
+        Parameters
+        ----------
+        aggregated_only : bool
+            If True, only plot the aggregated model predictions.
+        backend : str
+            "matplotlib" (default) or "plotly".
+
+        Returns
+        -------
+        matplotlib.figure.Figure or plotly.graph_objects.Figure
+        """
+        if backend == "plotly":
+            return self._show_plotly(
+                'predictions', 'test_confidence_interval', aggregated_only)
+        return self._show(
+            'predictions', 'test_confidence_interval', aggregated_only)
+
+    def forecast(self, aggregated_only: bool = False,
+                 backend: str = "matplotlib"
+                 ) -> Union[matplotlib.figure.Figure, go.Figure]:
+        """Plot raw data and forecasted values (for future dates) on same graph.
+
+        Parameters
+        ----------
+        aggregated_only : bool
+            If True, only plot the aggregated model forecasts.
+        backend : str
+            "matplotlib" (default) or "plotly".
+
+        Returns
+        -------
+        matplotlib.figure.Figure or plotly.graph_objects.Figure
+        """
+        if backend == "plotly":
+            return self._show_plotly(
+                'forecast', 'forecast_confidence_interval',
+                aggregated_only, prepend_last_obs=True)
+        return self._show(
+            'forecast', 'forecast_confidence_interval',
+            aggregated_only, prepend_last_obs=True)
 
     # --- Internal shared rendering ---
 
     def _show(self, data_key: str, ci_key: str, aggregated_only: bool,
-              display: bool, prepend_last_obs: bool = False) -> None:
-        """Shared matplotlib renderer for predictions and forecasts."""
-        if not self.__signal.models:
+              prepend_last_obs: bool = False) -> matplotlib.figure.Figure:
+        if not self._signal.models:
             raise ValueError(_NO_PREDICTIONS_MSG)
 
-        _, ax = plt.subplots()
-        n_signals = self.__signal.test_data.shape[1]
+        fig, ax = plt.subplots()
+        n_signals = self._signal.test_data.shape[1]
         labels = [f'Actuals_s{i}' for i in range(1, n_signals + 1)]
-        ax.plot(self.__signal.data, c='gray')
+        ax.plot(self._signal.data, c='gray')
 
         if aggregated_only:
-            if 'AggregatedModel' not in self.__signal.models:
+            if 'AggregatedModel' not in self._signal.models:
                 raise ValueError('No predictions have been computed with aggregated model')
             to_plot = ['AggregatedModel']
-            for i, unit in enumerate(self.__signal.data.columns):
-                itv = self.__signal.models['AggregatedModel'][ci_key]
+            for i, unit in enumerate(self._signal.data.columns):
+                itv = self._signal.models['AggregatedModel'][ci_key]
                 bounds = _confidence_bounds(itv[unit])
                 ax.plot(bounds, color='green', linestyle='--')
                 ax.fill_between(bounds.index, bounds['lower'], bounds['upper'],
                                 color='green', alpha=0.3)
                 labels += [f'lower_s{i + 1}', f'upper_s{i + 1}', f'interval_s{i + 1}']
         else:
-            to_plot = list(self.__signal.models.keys())
+            to_plot = list(self._signal.models.keys())
 
         for model in to_plot:
-            if data_key not in self.__signal.models[model]:
+            if data_key not in self._signal.models[model]:
                 warnings.warn(f'No {data_key} have been computed with {model}')
                 continue
-            pred = _ts_to_df(self.__signal.models[model], data_key)
+            pred = _ts_to_df(self._signal.models[model], data_key)
             if prepend_last_obs:
-                pred = pd.concat([self.__signal.data.iloc[-1:], pred])
+                pred = pd.concat([self._signal.data.iloc[-1:], pred])
             ax.plot(pred)
             labels += [f'{model}_s{i}' for i in range(1, n_signals + 1)]
 
         ax.legend(labels)
-        plt.xlabel('time')
-        plt.ylabel('values')
-        if display:
-            plt.show()
-        else:
-            plt.close()
+        ax.set_xlabel('time')
+        ax.set_ylabel('values')
+        return fig
 
     def _show_plotly(self, data_key: str, ci_key: str,
-                     prepend_last_obs: bool = False) -> None:
-        """Shared Plotly renderer for predictions and forecasts."""
-        if not self.__signal.models:
+                     aggregated_only: bool = False,
+                     prepend_last_obs: bool = False) -> go.Figure:
+        if not self._signal.models:
             raise ValueError(_NO_PREDICTIONS_MSG)
 
         fig = go.Figure()
-        for i, unit in enumerate(self.__signal.data.columns):
+        for i, unit in enumerate(self._signal.data.columns):
             fig.add_trace(go.Scatter(
-                x=self.__signal.data.index, y=self.__signal.data[unit],
+                x=self._signal.data.index, y=self._signal.data[unit],
                 mode='lines', name=f'Actual_s{i + 1}', line={'color': '#7f7f7f'}
             ))
 
+        if aggregated_only:
+            if 'AggregatedModel' not in self._signal.models:
+                raise ValueError('No predictions have been computed with aggregated model')
+            models_to_plot = {'AggregatedModel': self._signal.models['AggregatedModel']}
+        else:
+            models_to_plot = self._signal.models
+
         j = 0
-        last_obs = self.__signal.data.iloc[-1:]
-        for model_name, model_data in self.__signal.models.items():
+        last_obs = self._signal.data.iloc[-1:]
+        for model_name, model_data in models_to_plot.items():
             if data_key not in model_data:
                 warnings.warn(f'No {data_key} have been computed with {model_name}')
                 continue
@@ -189,45 +234,27 @@ class Visualization:
                     name=f'{model_name}_s{i + 1}', line={'color': trace_color}
                 ))
 
-                itv = model_data[ci_key][unit]
-                bounds = _confidence_bounds(itv)
-                ci_index = itv.index
+                if ci_key in model_data and unit in model_data[ci_key].columns:
+                    itv = model_data[ci_key][unit]
+                    bounds = _confidence_bounds(itv)
+                    ci_index = itv.index
 
-                fig.add_trace(go.Scatter(
-                    x=ci_index, y=bounds['lower'], mode='lines',
-                    line={'color': trace_color, 'dash': 'dash'}, showlegend=False,
-                    legendgroup=f'CI_{model_name}_s{i + 1}',
-                    name=f'CI_{model_name}_s{i + 1}'
-                ))
-                rgb = tuple(int(trace_color.lstrip('#')[k:k + 2], 16) for k in (0, 2, 4))
-                fig.add_trace(go.Scatter(
-                    x=ci_index, y=bounds['upper'], mode='lines',
-                    line={'color': trace_color, 'dash': 'dash'}, fill='tonexty',
-                    fillcolor=f'rgba{rgb + (0.3,)}',
-                    legendgroup=f'CI_{model_name}_s{i + 1}',
-                    name=f'CI_{model_name}_s{i + 1}'
-                ))
+                    fig.add_trace(go.Scatter(
+                        x=ci_index, y=bounds['lower'], mode='lines',
+                        line={'color': trace_color, 'dash': 'dash'}, showlegend=False,
+                        legendgroup=f'CI_{model_name}_s{i + 1}',
+                        name=f'CI_{model_name}_s{i + 1}'
+                    ))
+                    rgb = tuple(int(trace_color.lstrip('#')[k:k + 2], 16) for k in (0, 2, 4))
+                    fig.add_trace(go.Scatter(
+                        x=ci_index, y=bounds['upper'], mode='lines',
+                        line={'color': trace_color, 'dash': 'dash'}, fill='tonexty',
+                        fillcolor=f'rgba{rgb + (0.3,)}',
+                        legendgroup=f'CI_{model_name}_s{i + 1}',
+                        name=f'CI_{model_name}_s{i + 1}'
+                    ))
                 j += 1
 
         title = 'Forecasts with Confidence Intervals' if prepend_last_obs else 'Predictions with Confidence Intervals'
         fig.update_layout(title=title, xaxis_title='Time', yaxis_title='Values', showlegend=True)
-        fig.show()
-
-    # --- Public methods ---
-
-    def show_predictions(self, aggregated_only=False, display=True) -> None:
-        """Plots raw data and predicted values on same graph."""
-        self._show('predictions', 'test_confidence_interval', aggregated_only, display)
-
-    def show_predictions_plotly(self) -> None:
-        """Plots raw data and predicted values on the same Plotly graph with confidence intervals."""
-        self._show_plotly('predictions', 'test_confidence_interval')
-
-    def show_forecast(self, aggregated_only=False, display=True) -> None:
-        """Plots raw data and forecasted values (for future dates) on same graph."""
-        self._show('forecast', 'forecast_confidence_interval', aggregated_only, display,
-                   prepend_last_obs=True)
-
-    def show_forecast_plotly(self) -> None:
-        """Plots raw data and predicted future values on the same Plotly graph with confidence intervals."""
-        self._show_plotly('forecast', 'forecast_confidence_interval', prepend_last_obs=True)
+        return fig

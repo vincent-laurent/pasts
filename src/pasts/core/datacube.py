@@ -52,12 +52,23 @@ def _record(op):
     return decorator
 
 
-def _to_dataframe(component, index: pd.Index):
-    """Extract a DataFrame from any component type."""
+def _to_dataframe(component, index: pd.Index, horizon: int = None):
+    """Extract a DataFrame from any component type.
+
+    Parameters
+    ----------
+    component : DataCube, object with reverse_transform, callable, int, or float
+    index : pd.Index
+        Target index for alignment.
+    horizon : int, optional
+        If positive, request future values from the component (forecast mode).
+        If None, request historical values matching the index length.
+    """
     if isinstance(component, DataCube):
         return component.data.reindex(index)
     if hasattr(component, 'reverse_transform'):
-        return component.reverse_transform(-len(index))
+        i = horizon if horizon is not None and horizon > 0 else -len(index)
+        return component.reverse_transform(i)
     if callable(component):
         return component(index)
     if isinstance(component, (int, float)):

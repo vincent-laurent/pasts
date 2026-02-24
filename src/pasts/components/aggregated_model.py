@@ -36,20 +36,43 @@ def _weighted_aggregate(
 class AggregatedModel(TimeSeriesModel):
     """Weighted average of multiple TimeSeriesModel sub-models.
 
+    Works like any other :class:`TimeSeriesModel`: pass it to
+    ``Signal.apply_model()`` and the standard ``fit`` / ``reverse_transform``
+    cycle handles everything.
+
     Parameters
     ----------
     models : dict[str, TimeSeriesModel]
         Named sub-models to aggregate.
     weights : pd.DataFrame, optional
         Pre-computed weights (index=units, columns=model names).
-        If None, must be set via :meth:`compute_weights` before
-        calling :meth:`reverse_transform`.
+        If *None*, weights are computed automatically during :meth:`fit`
+        using *test_data*.
+    test_data : pd.DataFrame, optional
+        Actual test values used to compute RMSE-based weights during
+        :meth:`fit`.  Required when *weights* is not provided.
     """
 
     def __init__(self, models: dict[str, TimeSeriesModel],
-                 weights: pd.DataFrame = None):
-        self._models = models
+                 weights: pd.DataFrame = None,
+                 test_data: pd.DataFrame = None):
+        from pasts.components.darts_model import DartsModel
+        self._models = {
+            name: model if isinstance(model, TimeSeriesModel) else DartsModel(model)
+            for name, model in models.items()
+        }
         self._weights = weights
+        self._test_data = test_data
+
+    @property
+    def nan_safe(self) -> bool:
+        """An aggregated model is nan_safe only if all sub-models are."""
+        return all(m.nan_safe for m in self._models.values())
+
+    @property
+    def models(self) -> dict:
+        """Sub-models dictionary."""
+        return self._models
 
     @property
     def weights(self) -> pd.DataFrame:
@@ -62,13 +85,23 @@ class AggregatedModel(TimeSeriesModel):
     def fit(self, X) -> "AggregatedModel":
         """Fit all sub-models on *X*.
 
+        If weights have not been provided or computed yet and *test_data*
+        was given at construction, computes RMSE-based weights from the
+        sub-models' predictions vs. the stored test data.
+
         Parameters
         ----------
         X : pd.DataFrame or DataCube
-            Training data. Passed to each sub-model's ``fit()``.
+            Training data.  Passed to each sub-model's ``fit()``.
         """
         for model in self._models.values():
             model.fit(X)
+        if self._weights is None and self._test_data is not None:
+            predictions = {
+                name: m.reverse_transform(len(self._test_data))
+                for name, m in self._models.items()
+            }
+            self._weights = self.compute_weights(predictions, self._test_data)
         return self
 
     def reverse_transform(self, i: int) -> pd.DataFrame:
@@ -114,11 +147,10 @@ class AggregatedModel(TimeSeriesModel):
                 df_pred_temp = df_pred[df_pred.index < date]
                 df_test_temp = test_data[test_data.index < date]
                 for ref in weights.index.get_level_values(1).unique():
-                    weights.loc[(date, ref), model_name] = (
-                        1 / root_mean_squared_error(
-                            df_test_temp[ref], df_pred_temp[ref]
-                        )
+                    rmse = root_mean_squared_error(
+                        df_test_temp[ref], df_pred_temp[ref]
                     )
+                    weights.loc[(date, ref), model_name] = 1 / (rmse + 1e-10)
 
         for i in weights.index:
             weights.loc[i] = weights.loc[i] / weights.loc[i].sum()

@@ -21,15 +21,29 @@ class TimeSeriesModel(ABC):
 
     Two families exist:
 
-    - :class:`ParametricModel` — component defined as a parametric function
-      of time f(t); can predict for any time index after fitting.
+    - Trend components (e.g. :class:`LinearTrend`, :class:`NonParametricTrend`)
+      — extract and restore signal components (trend, etc.).
     - :class:`DartsModel` — component backed by a Darts ML/DL estimator;
       applicable to any :class:`~pasts.core.datacube.DataCube` or DataFrame,
       whether it is the raw signal or a residual.
 
     Subclasses must implement :meth:`fit` and :meth:`reverse_transform`.
     :meth:`transform` is provided as a default (negation of ``reverse_transform``).
+
+    Attributes
+    ----------
+    nan_safe : bool
+        Whether ``fit()`` can handle NaN values in the input data.
+        Defaults to ``False``.  Subclasses that handle NaN internally
+        (e.g. via interpolation) should set this to ``True``.
     """
+
+    nan_safe: bool = False
+
+    @property
+    def name(self) -> str:
+        """Model name used as key in ``Signal.models``."""
+        return self.__class__.__name__
 
     @abstractmethod
     def fit(self, X: pd.DataFrame) -> "TimeSeriesModel":

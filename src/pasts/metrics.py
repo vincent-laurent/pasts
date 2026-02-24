@@ -80,7 +80,7 @@ class Metrics:
         Dataframe of scores with unit or time as index and metrics as columns
         """
         df_test = self.signal.test_data.copy()
-        df_pred = self.signal.models[model]['predictions'].to_dataframe()
+        df_pred = self.signal.models[model]['predictions'].copy()
 
         if axis == 0:
             df_pred = df_pred.transpose()
@@ -91,8 +91,13 @@ class Metrics:
             df_temp = pd.DataFrame(df_pred[col])
             df_temp['test'] = df_test[col]
             if df_temp.isnull().sum().sum() != 0:
-                warnings.warn('Test set or predictions contain NaN values: they are deleted to compute the metrics',
-                              UserWarning)
+                n = int(df_temp.isnull().sum().sum())
+                warnings.warn(
+                    f"Column '{col}': {n} NaN value(s) in test set or predictions. "
+                    f"NaN rows are dropped for metric computation, which may "
+                    f"affect score reliability.",
+                    UserWarning,
+                )
                 df_temp.dropna(inplace=True)
             test = df_temp[df_temp.columns[0]].values
             pred = df_temp[df_temp.columns[1]].values
@@ -114,16 +119,16 @@ class Metrics:
         -------
         Dataframe of scores with unit as index and metrics as columns
         """
-        ts_test = TimeSeries.from_dataframe(self.signal.test_data)
-        ts_pred = self.signal.models[model]['predictions']
-        results = pd.DataFrame(index=ts_pred.columns, columns=list(self.dict_metrics_darts.keys()))
+        df_test = self.signal.test_data.copy()
+        df_pred = self.signal.models[model]['predictions'].copy()
+        ts_test = TimeSeries.from_dataframe(df_test)
+        ts_pred = TimeSeries.from_dataframe(df_pred)
+        results = pd.DataFrame(index=df_pred.columns, columns=list(self.dict_metrics_darts.keys()))
 
-        df_test = ts_test.to_dataframe()
-        df_pred = ts_pred.to_dataframe()
         zero_indices = (df_test.index[df_test.eq(0.0).any(axis=1)]
                         .union(df_pred.index[df_pred.eq(0.0).any(axis=1)]))
 
-        for col in ts_pred.columns:
+        for col in df_pred.columns:
             for metric in self.dict_metrics_darts.keys():
                 if metric == 'mape' and len(zero_indices) > 0:
                     warnings.warn('Test set or predictions contain 0 values: cannot compute mape', UserWarning)
