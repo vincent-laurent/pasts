@@ -61,7 +61,7 @@ signal.decompositions["MA_Trend"].apply_model(RandomForestModel(lags=250), save_
 
 #--- Forecast: composes predictions + forecast back to original space ---
 # signal.models["MA_Trend__XGBModel"] is now populated with composed predictions
-signal.forecast("MA_Trend", "XGBModel", 100, save_model=True)
+signal.forecast("MA_Trend__XGBModel", 100, save_model=True)
 signal.forecast("MA_Trend", "RandomForestModel", 100, save_model=True)
 
 #--- Compute scores (on composed predictions vs original signal) ---
@@ -116,8 +116,8 @@ signal_m.decompositions["MA_Trend"].apply_model(XGBModel(lags=lags), save_model=
 signal_m.decompositions["MA_Trend"].apply_model(RandomForestModel(lags=lags), save_model=True)
 
 #--- Forecast: composes predictions + forecast back to original space ---
-signal_m.forecast("MA_Trend", "XGBModel", 50, save_model=True)
-signal_m.forecast("MA_Trend", "RandomForestModel", 50, save_model=True)
+signal_m.forecast("MA_Trend__XGBModel", 50, save_model=True)
+signal_m.forecast("MA_Trend__RandomForestModel", 50, save_model=True)
 
 #--- Visualize forecasts ---
 fig = signal_m.plot.forecast()

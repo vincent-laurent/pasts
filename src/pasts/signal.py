@@ -30,11 +30,10 @@ from pasts.visualization import PlotAccessor
 def _build_ci(pred: pd.DataFrame, std_values: dict) -> pd.DataFrame:
     """Build a confidence-interval DataFrame from a predictions DataFrame and per-column std values."""
     df_itv = pd.DataFrame(index=pred.index, columns=pred.columns)
-    weights = np.arange(1, len(pred) + 1, dtype=float)
     for ref in pred.columns:
         vals = pred[ref].values
-        itv_inf = vals - 1.96 * std_values[ref] * np.sqrt(weights)
-        itv_sup = vals + 1.96 * std_values[ref] * np.sqrt(weights)
+        itv_inf = vals - 1.96 * std_values[ref]
+        itv_sup = vals + 1.96 * std_values[ref]
         df_itv[ref] = list(zip(itv_inf, itv_sup))
     return df_itv
 
@@ -459,7 +458,7 @@ class Signal(DataCube):
                 persistence.save_model(self.path, name, result, suffix="final")
                 persistence.save_common_data(self.path, self.train_data, self.test_data)
 
-    def _conf_interval_test(self, model_name: str, window_size: int = 6):
+    def _conf_interval_test(self, model_name: str):
         if model_name not in self.models:
             raise AttributeError(f'{model_name} has not been fitted.')
         result = self.models[model_name]
@@ -469,7 +468,7 @@ class Signal(DataCube):
         for ref in pred.columns:
             errors = self.test_data[ref].values - pred[ref].values
             df_residuals[ref] = errors
-            std_values[ref] = pd.Series(errors).rolling(window=window_size).std().values
+            std_values[ref] = np.std(errors)
         result.test_residuals = df_residuals
         result.test_confidence_interval = _build_ci(pred, std_values)
 
@@ -484,11 +483,11 @@ class Signal(DataCube):
                       for ref in pred.columns}
         result.forecast_confidence_interval = _build_ci(pred, std_values)
 
-    def compute_conf_intervals(self, window_size: int = 10, save=False):
+    def compute_conf_intervals(self, save=False):
         if not self.models:
             raise AttributeError('No predictions have been found.')
         for model_ in self.models.keys():
-            self._conf_interval_test(model_, window_size)
+            self._conf_interval_test(model_)
             if self.models[model_].forecast is not None:
                 self._conf_interval_forecast(model_)
             if save:
