@@ -17,7 +17,7 @@ different time-series profiles:
 
 Usage
 -----
-    python examples/ex_favorita.py
+    python examples/favorita/favorita.py
 """
 
 import os

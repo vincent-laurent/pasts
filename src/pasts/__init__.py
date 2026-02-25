@@ -13,6 +13,7 @@ from pasts.components import (
 )
 from pasts.signal import Signal
 from pasts.statistical_tests import StatAccessor
+from pasts.validation import ValidationAccessor
 
 __all__ = [
     "AggregatedModel",
@@ -31,4 +32,5 @@ __all__ = [
     "StatAccessor",
     "STLTrend",
     "TimeSeriesModel",
+    "ValidationAccessor",
 ]

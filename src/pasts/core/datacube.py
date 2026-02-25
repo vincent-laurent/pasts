@@ -68,7 +68,15 @@ def _to_dataframe(component, index: pd.Index, horizon: int = None):
         return component.data.reindex(index)
     if hasattr(component, 'reverse_transform'):
         i = horizon if horizon is not None and horizon > 0 else -len(index)
-        return component.reverse_transform(i)
+        result = component.reverse_transform(i)
+        # Force the index to match the target when lengths agree.
+        # This is needed when a non-parametric trend was fit on a subset
+        # (e.g. train_data only): the stored trend has the correct values
+        # but carries the training-period DatetimeIndex instead of the
+        # target (e.g. test-period) index.
+        if hasattr(result, 'index') and len(result) == len(index):
+            result = result.set_axis(index)
+        return result
     if callable(component):
         return component(index)
     if isinstance(component, (int, float)):

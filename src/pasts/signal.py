@@ -15,13 +15,14 @@ from typing import Union
 
 import numpy as np
 import pandas as pd
+
 from pasts.core.base_model import TimeSeriesModel
 from pasts.core.datacube import DataCube
 from pasts.core.decomposition import Decomposition
 from pasts.core.model_result import ModelResult
 from pasts.components.darts_model import DartsModel
 from pasts.statistical_tests import StatAccessor
-from pasts.validation import Validation
+from pasts.validation import ValidationAccessor
 from pasts.metrics import Metrics
 from pasts import persistence
 from pasts.visualization import PlotAccessor
@@ -79,22 +80,22 @@ class Signal(DataCube):
         super().__init__(data)
         self._properties = Signal._profiling(data)
         self._tests_stat = {}
-        self._train_data = None
-        self._test_data = None
+        self._validation = ValidationAccessor(self)
         self.models = {}
         self._performance_models = {}
-        self._residual = None
-        self._learned_model = None
+        self._decompositions = {}
 
     @property
     def train_data(self):
-        """Train set as a pandas dataframe"""
-        return self._train_data
+        """Train set as a pandas dataframe (computed on demand from validation split)."""
+        ts = self._validation._timestamp
+        return None if ts is None else self.data.loc[self.data.index <= ts]
 
     @property
     def test_data(self):
-        """Test set as a pandas dataframe"""
-        return self._test_data
+        """Test set as a pandas dataframe (computed on demand from validation split)."""
+        ts = self._validation._timestamp
+        return None if ts is None else self.data.loc[self.data.index > ts]
 
     @property
     def properties(self):
@@ -136,24 +137,37 @@ class Signal(DataCube):
                 f"Unknown method {method!r}. Use 'drop', 'fill', or 'interpolate'."
             )
         self._properties = Signal._profiling(self._data)
-        if self._train_data is not None or self._test_data is not None:
-            self._train_data = None
-            self._test_data = None
+        if self._validation._timestamp is not None:
+            self._validation.reset()
             warnings.warn(
                 "Train/test split has been reset after handle_nan(). "
                 "Call validation_split() again.",
                 UserWarning,
             )
 
-    def decompose(self) -> None:
-        """Initialize the residual as a copy of the signal data.
+    def decompose(self, name: str = "default") -> None:
+        """Initialize a named residual as a copy of the signal data.
 
-        After calling this method, operate on ``signal.residual`` to build
-        the decomposition (e.g. ``signal.residual -= LinearTrend().fit(signal.data)``).
-        The residual is itself a :class:`Signal`, so all analysis methods
-        (``apply_model``, ``validation_split``, etc.) can be used on it directly.
+        After calling this method, operate on ``signal.decompositions[name]`` to
+        build the decomposition (e.g. ``signal.decompositions["t"] -= Trend().fit(...)``).
+        Each named residual is a full :class:`Signal`, so all analysis methods
+        (``apply_model``, ``validation_split``, etc.) work on it directly.
+        Multiple named decompositions can coexist on the same signal.
+
+        The new decomposition shares the parent's :class:`~pasts.validation.ValidationAccessor`,
+        so the train/test boundary is always in sync without any explicit propagation.
+
+        Parameters
+        ----------
+        name : str, optional
+            Name for this decomposition (default ``"default"``).
+            Calling ``decompose()`` without a name keeps backward compatibility
+            with ``signal.residual``.
         """
-        self._residual = Signal(self.data.copy())
+        decomp_path = os.path.join(self.path, name) if self.path else None
+        decomp = Signal(self.data.copy(), path=decomp_path)
+        decomp._validation = self._validation   # share — no propagation needed
+        self._decompositions[name] = decomp
 
     @property
     def plot(self) -> PlotAccessor:
@@ -184,20 +198,63 @@ class Signal(DataCube):
         return StatAccessor(self)
 
     @property
+    def validation(self) -> ValidationAccessor:
+        """Accessor for train/test split operations.
+
+        Usage::
+
+            signal.validation.split("2020-01-01")
+            signal.train_data                        # .loc slice, computed on demand
+            signal.test_data                         # .loc slice, computed on demand
+            signal.validation.split("2020-01-01", n_splits_cv=5)
+            signal.validation.cv_tseries
+        """
+        return self._validation
+
+    @property
+    def decompositions(self) -> dict:
+        """Dict of named residuals (each a :class:`Signal`).
+
+        Access a named decomposition via ``signal.decompositions["name"]``.
+        """
+        return self._decompositions
+
+    @property
     def residual(self) -> "Signal":
-        """Current residual (a :class:`Signal`)."""
-        return self._residual
+        """Shorthand for the default decomposition (``decompositions["default"]``).
+
+        Backward-compatible with ``signal.decompose()`` (no name).
+        """
+        return self._decompositions.get("default")
 
     @residual.setter
     def residual(self, value):
-        self._residual = value
+        self._decompositions["default"] = value
 
     @property
     def decomposition(self) -> "Decomposition":
-        """Decomposition formula derived from operations applied to the residual."""
-        if self._residual is None:
+        """Decomposition formula for the default residual.
+
+        Backward-compatible property. For named decompositions use
+        ``signal.get_decomposition(name)``.
+        """
+        if "default" not in self._decompositions:
             raise AttributeError("No decomposition. Call decompose() first.")
-        return Decomposition(self._residual._ops)
+        return Decomposition(self._decompositions["default"]._ops)
+
+    def get_decomposition(self, name: str = "default") -> "Decomposition":
+        """Return the :class:`Decomposition` formula for a named residual.
+
+        Parameters
+        ----------
+        name : str
+            Name of the decomposition (as passed to ``decompose(name)``).
+        """
+        if name not in self._decompositions:
+            raise AttributeError(
+                f"No decomposition named {name!r}. Call decompose({name!r}) first."
+            )
+        return Decomposition(self._decompositions[name]._ops)
 
     @staticmethod
     def _check_nan_for_model(data: pd.DataFrame, model: "TimeSeriesModel", context: str) -> None:
@@ -213,32 +270,12 @@ class Signal(DataCube):
                 f"(e.g. df.fillna(), df.dropna(), df.interpolate())."
             )
 
-    def learn(self, model: object) -> None:
-        """Fit a forecasting model on this signal's data.
-
-        Intended for the terminal step of a decomposition workflow:
-        after stripping components from the residual, fit a model that
-        will predict the residual.
-
-        Parameters
-        ----------
-        model : TimeSeriesModel or raw Darts model
-            The model to fit. Raw Darts models are auto-wrapped in DartsModel.
-        """
-        if not isinstance(model, TimeSeriesModel):
-            model = DartsModel(model)
-        model = copy.deepcopy(model)
-        self._check_nan_for_model(self.data, model, "learn")
-        model.fit(self.data)
-        self._learned_model = model
-
     def validation_split(self, timestamp: Union[int, str, pd.Timestamp], n_splits_cv=None) -> None:
         """
         Splits the series between train and test sets.
 
-        If n_splits_cv is filled, yields train and test indices for cross-validation.
-
-        Fills the attributes train_data and test_data.
+        Delegates to :meth:`signal.validation.split`.
+        Also accessible via ``signal.validation.split(timestamp)``.
 
         Parameters
         ----------
@@ -246,17 +283,8 @@ class Signal(DataCube):
                 Time index to split between train and test sets
         n_splits_cv : int, optional
                 Number of folds for cross-validation
-
-        Returns
-        -------
-        None
         """
-        call_validation = Validation(self.data)
-        call_validation.split_cv(timestamp, n_splits_cv)
-        if call_validation.train_data.shape[0] < 2:
-            raise ValueError("Train set is empty or too small.")
-        self._train_data = call_validation.train_data
-        self._test_data = call_validation.test_data
+        self._validation.split(timestamp, n_splits_cv)
 
     def apply_model(self,
                     model: object,
@@ -352,53 +380,84 @@ class Signal(DataCube):
             result.final_estimator = copy.deepcopy(result.model)
             result.final_estimator.fit(self.data)
 
-    def forecast(self, model_name: str = None, horizon: int = None, save_model: bool = False) -> None:
+    def forecast(self, name: str, horizon: int, save_model: bool = False) -> None:
         """
         Generates forecasts for future dates.
 
-        Fills models attribute with a 'forecast' key and a 'final_estimator' key.
+        ``forecast(name, horizon)``
+            *Direct path* — ``name`` is a model key in ``self.models``
+            (registered via :meth:`apply_model`).  The model is refitted on
+            the full dataset before forecasting.
+
+        ``forecast("decomp__model", horizon)``
+            *Decomposition path* — ``name`` contains ``__`` and is split into
+            ``decomp_name`` and ``model_name``.  The model must have been
+            trained on ``signal.decompositions[decomp_name]`` via
+            :meth:`apply_model`.  The forecast is composed back through the
+            decomposition formula and stored in
+            ``signal.models["decomp__model"]``.
 
         Parameters
         ----------
-        model_name : str, optional
-                Name of a model previously fitted via apply_model(). If None and a
-                model has been learned on the residual (via ``residual.learn()``),
-                that model is used automatically with decomposition recomposition.
+        name : str
+            Model key, or ``"decomp_name__model_name"`` for the decomposition
+            path.
         horizon : int
-                Horizon of prediction.
+            Number of steps to forecast.
         save_model : bool, optional
-                Whether to save the model in a file in Signal.path (default is False).
-
-        Returns
-        -------
-        None
+            Whether to persist the result to disk (default ``False``).
         """
-        # --- Decomposition path: model learned on the residual ---
-        if model_name is None:
-            if (self._residual is None
-                    or self._residual._learned_model is None):
+        if '__' in name:
+            # --- Decomposition path: forecast("decomp__model", horizon) ---
+            decomp_name, model_name = name.split('__', 1)
+            if decomp_name not in self._decompositions:
                 raise ValueError(
-                    "No model_name provided and no model has been "
-                    "learned on the residual. Call residual.learn() first.")
-            model = self._residual._learned_model
-            forecast_df = model.reverse_transform(horizon)
-            forecast_df = self.decomposition.compose(
-                DataCube(forecast_df), horizon=horizon).data
-            learned_name = model.name
-            if learned_name not in self.models:
-                self.models[learned_name] = ModelResult(model=model)
-            self.models[learned_name].forecast = forecast_df
-            return
+                    f"No decomposition named {decomp_name!r}. "
+                    f"Call decompose({decomp_name!r}) first."
+                )
+            decomp_signal = self._decompositions[decomp_name]
+            if model_name not in decomp_signal.models:
+                raise ValueError(
+                    f"Model {model_name!r} has not been trained on "
+                    f"decomposition {decomp_name!r}."
+                )
+            decomp_signal._ensure_final_estimator(model_name)
+            result = decomp_signal.models[model_name]
+            decomp = self.get_decomposition(decomp_name)
 
-        # --- Direct path (uniform for all models including AggregatedModel) ---
-        if model_name not in self.models:
-            raise ValueError(f'{model_name} has not been trained.')
-        self._ensure_final_estimator(model_name)
-        result = self.models[model_name]
-        result.forecast = result.final_estimator.reverse_transform(horizon)
-        if save_model:
-            persistence.save_model(self.path, model_name, result, suffix="final")
-            persistence.save_common_data(self.path, self.train_data, self.test_data)
+            # Compose test predictions back to the original signal space
+            if result.predictions is not None:
+                composed_pred = decomp.compose(DataCube(result.predictions)).data
+                if len(composed_pred) == len(self.test_data):
+                    composed_pred.index = self.test_data.index
+            else:
+                composed_pred = None
+
+            # Compose forecast
+            residual_forecast = result.final_estimator.reverse_transform(horizon)
+            composed_forecast = decomp.compose(
+                DataCube(residual_forecast), horizon=horizon).data
+
+            self.models[name] = ModelResult(
+                model=result.model,
+                predictions=composed_pred,
+                best_parameters=result.best_parameters,
+                forecast=composed_forecast,
+            )
+            if save_model:
+                persistence.save_model(self.path, name, self.models[name], suffix="final")
+                persistence.save_common_data(self.path, self.train_data, self.test_data)
+
+        else:
+            # --- Direct path: forecast(model_name, horizon) ---
+            if name not in self.models:
+                raise ValueError(f'{name} has not been trained.')
+            self._ensure_final_estimator(name)
+            result = self.models[name]
+            result.forecast = result.final_estimator.reverse_transform(horizon)
+            if save_model:
+                persistence.save_model(self.path, name, result, suffix="final")
+                persistence.save_common_data(self.path, self.train_data, self.test_data)
 
     def _conf_interval_test(self, model_name: str, window_size: int = 6):
         if model_name not in self.models:

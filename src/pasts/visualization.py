@@ -87,7 +87,7 @@ class PlotAccessor:
         self._signal.data.plot(ax=ax, **kwargs)
         for col in self._signal.data.columns:
             legend.append(f'raw data: {col}')
-        if self._signal._residual is not None:
+        if self._signal.residual is not None:
             self._signal.residual.data.plot(ax=ax, **kwargs)
             for col in self._signal.residual.data.columns:
                 legend.append(f'residual: {col}')
@@ -165,7 +165,7 @@ class PlotAccessor:
         fig, ax = plt.subplots()
         n_signals = self._signal.test_data.shape[1]
         labels = [f'Actuals_s{i}' for i in range(1, n_signals + 1)]
-        ax.plot(self._signal.data, c='gray')
+        self._signal.data.plot(ax=ax, color='gray', legend=False)
 
         if aggregated_only:
             if 'AggregatedModel' not in self._signal.models:
@@ -174,7 +174,7 @@ class PlotAccessor:
             for i, unit in enumerate(self._signal.data.columns):
                 itv = self._signal.models['AggregatedModel'][ci_key]
                 bounds = _confidence_bounds(itv[unit])
-                ax.plot(bounds, color='green', linestyle='--')
+                bounds.plot(ax=ax, color='green', linestyle='--', legend=False)
                 ax.fill_between(bounds.index, bounds['lower'], bounds['upper'],
                                 color='green', alpha=0.3)
                 labels += [f'lower_s{i + 1}', f'upper_s{i + 1}', f'interval_s{i + 1}']
@@ -188,7 +188,7 @@ class PlotAccessor:
             pred = _ts_to_df(self._signal.models[model], data_key)
             if prepend_last_obs:
                 pred = pd.concat([self._signal.data.iloc[-1:], pred])
-            ax.plot(pred)
+            pred.plot(ax=ax, legend=False)
             labels += [f'{model}_s{i}' for i in range(1, n_signals + 1)]
 
         ax.legend(labels)

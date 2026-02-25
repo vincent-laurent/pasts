@@ -147,25 +147,99 @@ def test_decomposition_learn_forecast(get_univariate_data):
     from pasts.components.trend import LinearTrend
 
     signal = Signal(get_univariate_data, 'tests')
+    tstamp = '1958-12-01'
+    signal.validation_split(tstamp)
     signal.decompose()
 
     # Subtract trend from residual
     trend = LinearTrend().fit(signal.data)
     signal.residual -= trend
 
-    # Learn a model on the residual
-    signal.residual.learn(ExponentialSmoothing())
-    assert signal.residual._learned_model is not None
+    # Fit a model on the residual via apply_model
+    signal.residual.apply_model(ExponentialSmoothing())
+    assert 'ExponentialSmoothing' in signal.residual.models
 
-    # Forecast through decomposition
-    signal.forecast(horizon=12)
+    # Forecast through decomposition using the unified API
+    signal.forecast('default__ExponentialSmoothing', 12)
 
-    model_name = signal.residual._learned_model.name
-    assert model_name in signal.models
-    assert 'forecast' in signal.models[model_name]
-    assert len(signal.models[model_name]['forecast']) == 12
+    assert 'default__ExponentialSmoothing' in signal.models
+    assert 'forecast' in signal.models['default__ExponentialSmoothing']
+    assert len(signal.models['default__ExponentialSmoothing']['forecast']) == 12
     # Forecast index should be in the future
-    assert signal.models[model_name]['forecast'].index[0] > signal.data.index[-1]
+    assert signal.models['default__ExponentialSmoothing']['forecast'].index[0] > signal.data.index[-1]
+
+
+def test_named_decompositions(get_univariate_data):
+    from pasts.components.trend import LinearTrend, MovingAverageTrend
+
+    signal = Signal(get_univariate_data, 'tests')
+    tstamp = '1958-12-01'
+    signal.validation_split(tstamp)
+
+    # Create two named decompositions
+    signal.decompose("linear")
+    signal.decompose("ma")
+
+    assert "linear" in signal.decompositions
+    assert "ma" in signal.decompositions
+    assert isinstance(signal.decompositions["linear"], Signal)
+    assert isinstance(signal.decompositions["ma"], Signal)
+
+    # Residual property still points to "default" (None if not created)
+    assert signal.residual is None
+
+    # Apply different trends to each named residual
+    signal.decompositions["linear"] -= LinearTrend().fit(signal.data)
+    signal.decompositions["ma"] -= MovingAverageTrend(12).fit(signal.data)
+
+    # Each residual has its own ops stack
+    assert len(signal.decompositions["linear"]._ops) == 1
+    assert len(signal.decompositions["ma"]._ops) == 1
+
+    # get_decomposition() returns the correct Decomposition
+    from pasts.core.decomposition import Decomposition
+    assert isinstance(signal.get_decomposition("linear"), Decomposition)
+    assert isinstance(signal.get_decomposition("ma"), Decomposition)
+    with pytest.raises(AttributeError):
+        signal.get_decomposition("nonexistent")
+
+    # Split is already propagated from parent signal — no need to call
+    # validation_split again on each decomposition.
+    signal.decompositions["linear"].apply_model(ExponentialSmoothing())
+    signal.decompositions["linear"].compute_scores()
+
+    signal.decompositions["ma"].apply_model(ExponentialSmoothing())
+    signal.decompositions["ma"].compute_scores()
+
+    # Forecast through named decomposition: forecast("decomp__model", horizon)
+    # → also composes test predictions into signal.models
+    signal.forecast("linear__ExponentialSmoothing", 12)
+    assert "linear__ExponentialSmoothing" in signal.models
+
+    entry = signal.models["linear__ExponentialSmoothing"]
+    # Forecast in future
+    assert len(entry["forecast"]) == 12
+    assert entry["forecast"].index[0] > signal.data.index[-1]
+    # Predictions composed back to original signal space
+    assert entry["predictions"] is not None
+    assert len(entry["predictions"]) == 24  # test set size
+    assert list(entry["predictions"].index) == list(signal.test_data.index)
+
+    # compute_scores works on composed predictions vs signal.test_data
+    signal.compute_scores()
+    assert signal.models["linear__ExponentialSmoothing"]["scores"]["unit_wise"] is not None
+
+    signal.forecast("ma__ExponentialSmoothing", 12)
+    assert "ma__ExponentialSmoothing" in signal.models
+
+    # Both forecasts coexist in signal.models
+    assert len([k for k in signal.models if "__" in k]) == 2
+
+    # Error when decomp_name or model_name not found
+    with pytest.raises(ValueError, match="No decomposition"):
+        signal.forecast("missing_decomp__ExponentialSmoothing", 12)
+    with pytest.raises(ValueError, match="has not been trained"):
+        signal.forecast("linear__AutoARIMA", 12)
 
 
 def test_properties(get_univariate_data, get_multivariate_data):
@@ -321,3 +395,65 @@ def test_all(get_univariate_data, get_multivariate_data):
     assert set(results_m.keys()) == expected_keys | {'causality'}
     for key, df in results_m.items():
         assert isinstance(df, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# ValidationAccessor + split propagation
+# ---------------------------------------------------------------------------
+
+def test_validation_accessor(get_univariate_data):
+    """signal.validation.split() is equivalent to signal.validation_split()."""
+    from pasts.validation import ValidationAccessor
+
+    signal = Signal(get_univariate_data)
+    tstamp = '1958-12-01'
+    signal.validation.split(tstamp)
+
+    # train_data / test_data are properties on Signal, not on the accessor
+    assert signal.train_data is not None
+    assert signal.test_data is not None
+    assert signal.train_data.shape[0] == 120
+    assert signal.test_data.shape[0] == 24
+    assert isinstance(signal.validation, ValidationAccessor)
+    assert signal.validation._timestamp == tstamp
+
+
+def test_validation_accessor_cv(get_univariate_data):
+    """cv_tseries is stored in the accessor and accessible via signal.validation.cv_tseries."""
+    signal = Signal(get_univariate_data)
+    tstamp = '1958-12-01'
+    assert signal.validation.cv_tseries is None
+    signal.validation.split(tstamp, n_splits_cv=3)
+    assert signal.validation.cv_tseries is not None
+
+
+def test_split_propagates_to_decompose_after(get_univariate_data):
+    """decompose() after validation_split() propagates the split automatically."""
+    signal = Signal(get_univariate_data)
+    tstamp = '1958-12-01'
+    signal.validation_split(tstamp)
+    signal.decompose("t")
+
+    decomp = signal.decompositions["t"]
+    assert decomp.train_data is not None
+    assert decomp.test_data is not None
+    assert decomp.train_data.shape[0] == signal.train_data.shape[0]
+    assert decomp.test_data.shape[0] == signal.test_data.shape[0]
+
+
+def test_split_propagates_to_decompose_before(get_univariate_data):
+    """decompose() before validation_split(): the shared accessor means the
+    decomposition sees the split as soon as it is set on the parent."""
+    signal = Signal(get_univariate_data)
+    tstamp = '1958-12-01'
+    signal.decompose("t")
+    assert signal.decompositions["t"].train_data is None  # not yet split
+
+    signal.validation_split(tstamp)
+    # Shared accessor — decomposition immediately reflects the split
+    decomp = signal.decompositions["t"]
+    assert decomp.train_data is not None
+    assert decomp.train_data.shape[0] == 120
+    assert decomp.test_data.shape[0] == 24
+
+

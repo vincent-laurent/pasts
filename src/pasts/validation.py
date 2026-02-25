@@ -8,66 +8,76 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
+from __future__ import annotations
+
 import logging
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import pandas as pd
-from sklearn.model_selection import TimeSeriesSplit
+
+if TYPE_CHECKING:
+    from pasts.signal import Signal
 
 logger = logging.getLogger(__name__)
 
 
-class Validation:
+class ValidationAccessor:
+    """Accessor for train/test split operations on a :class:`~pasts.signal.Signal`.
+
+    Accessed via ``signal.validation``.  Follows the same accessor pattern as
+    :class:`~pasts.statistical_tests.StatAccessor` and
+    :class:`~pasts.visualization.PlotAccessor`.
+
+    Stores only the split timestamp (one scalar) — no DataFrame copies.
+    ``Signal.train_data`` and ``Signal.test_data`` compute ``.loc`` slices
+    on demand from the signal's own data and this timestamp.
+
+    Decompositions share the parent signal's ``ValidationAccessor`` instance
+    directly, so any split change is immediately visible to all decompositions.
+
+    Examples
+    --------
+    >>> signal.validation.split("2020-01-01")
+    >>> signal.train_data          # .loc slice computed on demand
+    >>> signal.test_data           # .loc slice computed on demand
+    >>> signal.validation.split("2020-01-01", n_splits_cv=5)
+    >>> signal.validation.cv_tseries
     """
-    A class to split data between train and test sets (possibly cross-validation).
 
-    Attributes
-    ----------
-    __data : pd.Dataframe
-        Dataset to split
-    train_data : pd.Dataframe (default None)
-        Train set as a dataframe
-    test_data : pd.Dataframe(default None)
-        Test set as dataframe
+    def __init__(self, signal: "Signal"):
+        self._signal     = signal
+        self._timestamp  = None
+        self._cv_tseries = None
 
-    Methods
-    -------
-    split_cv(timestamp, n_splits_cv) :
-        Splits data between train set (<= timestamp) and test set (> timestamp).
-    """
-
-    def __init__(self, data: pd.DataFrame):
-        self.__cv_tseries = None
-        self.__data = data
-        self.train_data = None
-        self.test_data = None
-
-    @property
-    def cv_tseries(self):
-        """Cross-validation indexes if requested (default None)"""
-        return self.__cv_tseries
-
-    def split_cv(self, timestamp: Union[int, str, pd.Timestamp], n_splits_cv=None) -> None:
-        """
-        Splits data between train set (<= timestamp) and test set (> timestamp).
+    def split(self, timestamp: Union[int, str, pd.Timestamp],
+              n_splits_cv: int = None) -> None:
+        """Split the series between train (<= timestamp) and test (> timestamp).
 
         Parameters
         ----------
-        timestamp : Union[int, pd.Timestamp, str]
-            Split index
-        n_splits_cv : int (default None)
-            Number of folds for cross-validation
+        timestamp :
+            Index value that marks the train/test boundary.
+        n_splits_cv : int, optional
+            Number of folds for cross-validation on the training set.
         """
-        self.train_data = self.__data.loc[self.__data.index <= timestamp]
-        self.test_data = self.__data.loc[self.__data.index > timestamp]
-
+        train = self._signal.data.loc[self._signal.data.index <= timestamp]
+        if len(train) < 2:
+            raise ValueError("Train set is empty or too small.")
+        self._timestamp = timestamp
         logger.info("Split applied on: %s", timestamp)
-
         if n_splits_cv is not None:
-            cv = TimeSeriesSplit(n_splits=n_splits_cv)
-            splits = list(cv.split(self.train_data))
-            for fold, (train_index, test_index) in enumerate(splits):
-                logger.info("Fold %d: train %d→%d, test %d→%d",
-                            fold, train_index[0], train_index[-1],
-                            test_index[0], test_index[-1])
-            self.__cv_tseries = iter(splits)
+            from sklearn.model_selection import TimeSeriesSplit
+            splits = list(TimeSeriesSplit(n_splits=n_splits_cv).split(train))
+            self._cv_tseries = iter(splits)
+        else:
+            self._cv_tseries = None
+
+    def reset(self) -> None:
+        """Clear the split (called by :meth:`Signal.handle_nan`)."""
+        self._timestamp  = None
+        self._cv_tseries = None
+
+    @property
+    def cv_tseries(self):
+        """Iterator over (train_indices, test_indices) folds, or ``None``."""
+        return self._cv_tseries

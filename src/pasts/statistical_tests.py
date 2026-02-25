@@ -167,10 +167,10 @@ class StatAccessor:
         index = []
         for s1, s2 in combinations(names, 2):
             result_12 = grangercausalitytests(
-                self._signal.data[[s1, s2]], maxlag, verbose=False, **kwargs
+                self._signal.data[[s1, s2]], maxlag, **kwargs
             )
             result_21 = grangercausalitytests(
-                self._signal.data[[s2, s1]], maxlag, verbose=False, **kwargs
+                self._signal.data[[s2, s1]], maxlag, **kwargs
             )
             stat12 = result_12[1][0]['ssr_ftest'][0]
             pv12 = result_12[1][0]['ssr_ftest'][1]
