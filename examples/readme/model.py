@@ -47,7 +47,6 @@ signal.validation_split(timestamp=timestamp)
 #--- Named decomposition: remove trend, train models on residual ---
 signal.decompose("MA_Trend")
 signal.decompositions["MA_Trend"] -= MovingAverageTrend(30).fit(signal.data)
-signal.decompositions["MA_Trend"].validation_split(timestamp)
 
 fig = signal.plot()
 fig.savefig(os.path.join(IMG_DIR, 'op.png'), dpi=150, bbox_inches='tight')
@@ -62,7 +61,7 @@ signal.decompositions["MA_Trend"].apply_model(RandomForestModel(lags=250), save_
 #--- Forecast: composes predictions + forecast back to original space ---
 # signal.models["MA_Trend__XGBModel"] is now populated with composed predictions
 signal.forecast("MA_Trend__XGBModel", 100, save_model=True)
-signal.forecast("MA_Trend", "RandomForestModel", 100, save_model=True)
+signal.forecast("MA_Trend__RandomForestModel", 100, save_model=True)
 
 #--- Compute scores (on composed predictions vs original signal) ---
 signal.compute_scores()

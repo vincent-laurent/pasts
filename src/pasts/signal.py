@@ -13,7 +13,6 @@ import os
 import warnings
 from typing import Union
 
-import numpy as np
 import pandas as pd
 
 from pasts.core.base_model import TimeSeriesModel
@@ -26,16 +25,7 @@ from pasts.validation import ValidationAccessor
 from pasts.metrics import Metrics
 from pasts import persistence
 from pasts.visualization import PlotAccessor
-
-def _build_ci(pred: pd.DataFrame, std_values: dict) -> pd.DataFrame:
-    """Build a confidence-interval DataFrame from a predictions DataFrame and per-column std values."""
-    df_itv = pd.DataFrame(index=pred.index, columns=pred.columns)
-    for ref in pred.columns:
-        vals = pred[ref].values
-        itv_inf = vals - 1.96 * std_values[ref]
-        itv_sup = vals + 1.96 * std_values[ref]
-        df_itv[ref] = list(zip(itv_inf, itv_sup))
-    return df_itv
+from pasts.prediction_intervals import empirical_pi
 
 
 class Signal(DataCube):
@@ -458,38 +448,46 @@ class Signal(DataCube):
                 persistence.save_model(self.path, name, result, suffix="final")
                 persistence.save_common_data(self.path, self.train_data, self.test_data)
 
-    def _conf_interval_test(self, model_name: str):
+    def _conf_interval_test(self, model_name: str, scaling: str = "constant"):
         if model_name not in self.models:
             raise AttributeError(f'{model_name} has not been fitted.')
         result = self.models[model_name]
         pred = result.predictions
         df_residuals = pd.DataFrame(index=pred.index, columns=pred.columns)
-        std_values = {}
         for ref in pred.columns:
-            errors = self.test_data[ref].values - pred[ref].values
-            df_residuals[ref] = errors
-            std_values[ref] = np.std(errors)
+            df_residuals[ref] = self.test_data[ref].values - pred[ref].values
         result.test_residuals = df_residuals
-        result.test_confidence_interval = _build_ci(pred, std_values)
+        result.test_confidence_interval = empirical_pi(pred, df_residuals, scaling=scaling)
 
-    def _conf_interval_forecast(self, model_name: str):
+    def _conf_interval_forecast(self, model_name: str, scaling: str = "sqrt_h"):
         if model_name not in self.models:
             raise AttributeError(f'{model_name} has not been fitted.')
         result = self.models[model_name]
         if result.forecast is None:
             raise AttributeError(f'No forecasts have been computed with model {model_name}.')
-        pred = result.forecast
-        std_values = {ref: np.std(result.test_residuals[ref])
-                      for ref in pred.columns}
-        result.forecast_confidence_interval = _build_ci(pred, std_values)
+        result.forecast_confidence_interval = empirical_pi(
+            result.forecast, result.test_residuals, scaling=scaling)
 
-    def compute_conf_intervals(self, save=False):
+    def compute_conf_intervals(self, scaling_test: str = "constant",
+                               scaling_forecast: str = "sqrt_h", save=False):
+        """Compute confidence intervals for all fitted models.
+
+        Parameters
+        ----------
+        scaling_test : {"constant", "sqrt_h"}, optional
+            Width scaling for test-period intervals (default ``"constant"``).
+        scaling_forecast : {"constant", "sqrt_h"}, optional
+            Width scaling for forecast intervals (default ``"sqrt_h"`` —
+            random-walk assumption; see :mod:`pasts.prediction_intervals`).
+        save : bool, optional
+            Persist results to disk (default ``False``).
+        """
         if not self.models:
             raise AttributeError('No predictions have been found.')
         for model_ in self.models.keys():
-            self._conf_interval_test(model_)
+            self._conf_interval_test(model_, scaling=scaling_test)
             if self.models[model_].forecast is not None:
-                self._conf_interval_forecast(model_)
+                self._conf_interval_forecast(model_, scaling=scaling_forecast)
             if save:
                 persistence.save_model(self.path, model_, self.models[model_])
                 if self.models[model_].forecast is not None:
