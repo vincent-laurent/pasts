@@ -77,12 +77,12 @@ signal.apply_model(AggregatedModel(
     test_data=signal.test_data,
 ), save_model=True)
 signal.compute_scores(axis=1)
-signal.compute_conf_intervals(window_size=7)
+signal.compute_conf_intervals()
 
 #--- Additional forecasts ---
 signal.forecast("AggregatedModel", 100, save_model=True)
 
-signal.compute_conf_intervals(window_size=7)
+signal.compute_conf_intervals()
 
 fig = signal.plot.forecast()
 fig.savefig(os.path.join(IMG_DIR, 'fc.png'), dpi=150, bbox_inches='tight')
