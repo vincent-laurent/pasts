@@ -280,8 +280,7 @@ class TestSignalDecomposition:
         from pasts.signal import Signal
         signal = Signal(simple_df, path=str(tmp_path))
         signal.decompose()
-        trend = LinearTrend().fit(simple_df)
-        signal.residual -= trend
+        signal.residual -= LinearTrend()
         decomp = signal.decomposition
         assert isinstance(decomp, Decomposition)
         assert len(decomp.components()) == 1
@@ -296,9 +295,79 @@ class TestSignalDecomposition:
         from pasts.signal import Signal
         signal = Signal(simple_df, path=str(tmp_path))
         signal.decompose()
-        trend = LinearTrend().fit(simple_df)
-        signal.residual -= trend
+        signal.residual -= LinearTrend()
         signal.residual /= 2
         R = DataCube(signal.residual.data.copy())
         reconstructed = signal.decomposition.compose(R)
         np.testing.assert_allclose(reconstructed.data.values, simple_df.values, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Standalone model API: model.fit() / model.forecast()
+# ---------------------------------------------------------------------------
+
+class TestStandaloneModelAPI:
+
+    def test_linear_trend_forecast(self, simple_df):
+        """LinearTrend.fit(X).forecast(h) returns a DataFrame."""
+        trend = LinearTrend()
+        trend.fit(simple_df)
+        forecast = trend.forecast(10)
+        assert isinstance(forecast, pd.DataFrame)
+        assert len(forecast) == 10
+
+    def test_decomposition_fit_forecast(self, simple_df):
+        """Decomposition with ops + model can fit and forecast standalone."""
+        from darts.models import ExponentialSmoothing
+        from pasts.components.darts_model import DartsModel
+
+        # Build ops via DataCube (imperative workflow)
+        r = DataCube(simple_df.copy())
+        trend = LinearTrend().fit(simple_df)
+        r -= trend
+
+        # Create Decomposition with model
+        decomp = Decomposition(r._ops, model=DartsModel(ExponentialSmoothing()))
+        decomp.fit(simple_df)
+        forecast = decomp.forecast(5)
+        assert isinstance(forecast, pd.DataFrame)
+        assert len(forecast) == 5
+
+    def test_decomposition_reverse_transform_positive(self, simple_df):
+        """Decomposition.reverse_transform(positive) returns forecast values."""
+        from darts.models import ExponentialSmoothing
+        from pasts.components.darts_model import DartsModel
+
+        r = DataCube(simple_df.copy())
+        trend = LinearTrend().fit(simple_df)
+        r -= trend
+
+        decomp = Decomposition(r._ops, model=DartsModel(ExponentialSmoothing()))
+        decomp.fit(simple_df)
+        result = decomp.reverse_transform(5)
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 5
+
+    def test_decomposition_without_model_raises(self, simple_df):
+        """reverse_transform raises when no model is set."""
+        r = DataCube(simple_df.copy())
+        r -= 10
+        decomp = Decomposition(r._ops)
+        with pytest.raises(ValueError, match="No residual model"):
+            decomp.reverse_transform(5)
+
+    def test_decomposition_is_timeseriesmodel(self):
+        """Decomposition inherits from TimeSeriesModel."""
+        from pasts.core.base_model import TimeSeriesModel
+        assert issubclass(Decomposition, TimeSeriesModel)
+
+    def test_darts_model_forecast(self, simple_df):
+        """DartsModel.fit(X).forecast(h) works standalone."""
+        from darts.models import ExponentialSmoothing
+        from pasts.components.darts_model import DartsModel
+
+        model = DartsModel(ExponentialSmoothing())
+        model.fit(simple_df)
+        forecast = model.forecast(5)
+        assert isinstance(forecast, pd.DataFrame)
+        assert len(forecast) == 5

@@ -110,8 +110,7 @@ The split defined on the parent is automatically shared with each decomposition.
 from pasts.components import MovingAverageTrend
 
 signal.decompose("MA_Trend")
-signal.decompositions["MA_Trend"] -= MovingAverageTrend(30).fit(signal.data)
-signal.decompositions["MA_Trend"].validation_split(timestamp)
+signal.decompositions["MA_Trend"] -= MovingAverageTrend(30)
 ```
 
 Each operation is recorded symbolically; `compose()` walks the stack in reverse to reconstruct
@@ -149,8 +148,8 @@ signal.decompositions["MA_Trend"].apply_model(RandomForestModel(lags=250), save_
 `signal.models["MA_Trend__XGBModel"]` is populated with the composed predictions afterwards.
 
 ```python
-signal.forecast("MA_Trend", "XGBModel", 100, save_model=True)
-signal.forecast("MA_Trend", "RandomForestModel", 100, save_model=True)
+signal.forecast("MA_Trend__XGBModel", 100, save_model=True)
+signal.forecast("MA_Trend__RandomForestModel", 100, save_model=True)
 ```
 
 ### Scores
@@ -177,10 +176,9 @@ from pasts.components.aggregated_model import AggregatedModel
 signal.apply_model(AggregatedModel(
     {'MA_Trend__XGBModel': signal.models['MA_Trend__XGBModel']['model'],
      'MA_Trend__RandomForestModel': signal.models['MA_Trend__RandomForestModel']['model']},
-    test_data=signal.test_data,
 ), save_model=True)
 signal.compute_scores(axis=1)
-signal.compute_conf_intervals(window_size=7)
+signal.compute_conf_intervals()
 signal.forecast("AggregatedModel", 100, save_model=True)
 ```
 
@@ -206,20 +204,19 @@ timestamp = '2018-04-01'
 signal_m.validation_split(timestamp=timestamp)
 
 signal_m.decompose("MA_Trend")
-signal_m.decompositions["MA_Trend"] -= MovingAverageTrend(30).fit(signal_m.data)
+signal_m.decompositions["MA_Trend"] -= MovingAverageTrend(30)
 
 lags = [-325]
 signal_m.decompositions["MA_Trend"].apply_model(XGBModel(lags=lags), save_model=True)
 signal_m.decompositions["MA_Trend"].apply_model(RandomForestModel(lags=lags), save_model=True)
 
-signal_m.forecast("MA_Trend", "XGBModel", 50, save_model=True)
-signal_m.forecast("MA_Trend", "RandomForestModel", 50, save_model=True)
+signal_m.forecast("MA_Trend__XGBModel", 50, save_model=True)
+signal_m.forecast("MA_Trend__RandomForestModel", 50, save_model=True)
 signal_m.compute_scores(axis=1)
 
 signal_m.apply_model(AggregatedModel(
     {'MA_Trend__XGBModel': signal_m.models['MA_Trend__XGBModel']['model'],
      'MA_Trend__RandomForestModel': signal_m.models['MA_Trend__RandomForestModel']['model']},
-    test_data=signal_m.test_data,
 ), save_model=True)
 signal_m.compute_scores()
 

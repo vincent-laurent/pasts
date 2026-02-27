@@ -46,8 +46,16 @@ class TimeSeriesModel(ABC):
         return self.__class__.__name__
 
     @abstractmethod
-    def fit(self, X: pd.DataFrame) -> "TimeSeriesModel":
-        """Fit the model to the time series *X*."""
+    def fit(self, X: pd.DataFrame, covariates=None) -> "TimeSeriesModel":
+        """Fit the model to the time series *X*.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Target time series.
+        covariates : :class:`~pasts.covariates.Covariates`, optional
+            Past, future and/or static covariates (default ``None``).
+        """
 
     @abstractmethod
     def reverse_transform(self, i: int) -> pd.DataFrame:
@@ -58,6 +66,49 @@ class TimeSeriesModel(ABC):
         i : int
             Length of output (negative for past, positive for future).
         """
+
+    def compute_historical_residuals(self, train_data: pd.DataFrame) -> pd.DataFrame:
+        """Compute one-step-ahead historical residuals on the training set.
+
+        Default implementation: ``train_data - reverse_transform(-n)``.
+        This is exact for deterministic models (trends).  Stochastic models
+        (e.g. :class:`DartsModel`) should override this to use proper
+        one-step-ahead historical forecasts.
+
+        Parameters
+        ----------
+        train_data : pd.DataFrame
+            Training data used during :meth:`fit`.
+
+        Returns
+        -------
+        pd.DataFrame
+            Residuals (may be shorter than *train_data* if the model cannot
+            produce fitted values for all training points).
+        """
+        n = len(train_data)
+        fitted = self.reverse_transform(-n)
+        if len(fitted) < n:
+            train_data = train_data.iloc[-len(fitted):]
+        if len(fitted) == len(train_data):
+            fitted.index = train_data.index
+        return train_data - fitted
+
+    def forecast(self, horizon: int) -> pd.DataFrame:
+        """Forecast the next *horizon* steps after the training data.
+
+        Convenience method equivalent to ``reverse_transform(horizon)``.
+
+        Parameters
+        ----------
+        horizon : int
+            Number of steps to forecast.
+
+        Returns
+        -------
+        pd.DataFrame
+        """
+        return self.reverse_transform(horizon)
 
     def transform(self, i: int) -> pd.DataFrame:
         """Return values to remove the component (negation of ``reverse_transform``).

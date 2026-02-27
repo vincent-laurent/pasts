@@ -46,7 +46,7 @@ signal.validation_split(timestamp=timestamp)
 
 #--- Named decomposition: remove trend, train models on residual ---
 signal.decompose("MA_Trend")
-signal.decompositions["MA_Trend"] -= MovingAverageTrend(30).fit(signal.data)
+signal.decompositions["MA_Trend"] -= MovingAverageTrend(30)
 
 fig = signal.plot()
 fig.savefig(os.path.join(IMG_DIR, 'op.png'), dpi=150, bbox_inches='tight')
@@ -70,11 +70,11 @@ signal.compute_scores()
 fig = signal.plot.predictions()
 fig.savefig(os.path.join(IMG_DIR, 'pred.png'), dpi=150, bbox_inches='tight')
 
+
 #--- Aggregated Model ---
 signal.apply_model(AggregatedModel(
     {'MA_Trend__XGBModel': signal.models['MA_Trend__XGBModel']['model'],
      'MA_Trend__RandomForestModel': signal.models['MA_Trend__RandomForestModel']['model']},
-    test_data=signal.test_data,
 ), save_model=True)
 signal.compute_scores(axis=1)
 signal.compute_conf_intervals()
@@ -107,7 +107,7 @@ timestamp = '2018-04-01'
 signal_m.validation_split(timestamp=timestamp)
 
 signal_m.decompose("MA_Trend")
-signal_m.decompositions["MA_Trend"] -= MovingAverageTrend(30).fit(signal_m.data)
+signal_m.decompositions["MA_Trend"] -= MovingAverageTrend(30)
 
 #--- Apply models on the named residual ---
 lags = [-325]

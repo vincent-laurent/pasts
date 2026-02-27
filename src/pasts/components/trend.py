@@ -93,7 +93,7 @@ class LinearTrend(TimeSeriesModel):
     def __init__(self):
         ...
 
-    def fit(self, X: pd.DataFrame) -> "LinearTrend":
+    def fit(self, X: pd.DataFrame, covariates=None) -> "LinearTrend":
         """
         Finds linear trend in passed series.
 
@@ -101,6 +101,8 @@ class LinearTrend(TimeSeriesModel):
         ----------
         X : pd.DataFrame
             Time series to detrend. Index must be a TimeIndex.
+        covariates : ignored
+            Accepted for interface compatibility.
 
         Returns
         -------
@@ -109,9 +111,9 @@ class LinearTrend(TimeSeriesModel):
         self.__origin_index = X.index
         self.time_index = X.index.to_numpy(dtype="float64") * 1e-17
         self.features_ = X.columns
-        X_filled, _ = _handle_nan(X)
+        x_filled, _ = _handle_nan(X)
         estimator = LinearRegression()
-        estimator.fit(self.time_index.reshape(-1, 1), X_filled.values)
+        estimator.fit(self.time_index.reshape(-1, 1), x_filled.values)
         self.coef_ = estimator.coef_                    # shape (n_columns, 1)
         self.intercept_ = estimator.intercept_          # shape (n_columns,)
         self.t0_ = self.time_index[-1]
@@ -199,7 +201,6 @@ class NonParametricTrend(TimeSeriesModel):
             arr = np.tile(last, (i, 1))
             return pd.DataFrame(arr, index=future_idx, columns=self._features)
         if self._extrapolation == 'linear':
-            t = np.arange(len(self._trend), dtype=float).reshape(-1, 1)
             future_t = np.arange(len(self._trend), len(self._trend) + i, dtype=float).reshape(-1, 1)
             arr = np.empty((i, len(self._features)))
             for j, col in enumerate(self._features):
@@ -233,7 +234,7 @@ class MovingAverageTrend(NonParametricTrend):
         self.window = window
         self.center = center
 
-    def fit(self, X: pd.DataFrame) -> "MovingAverageTrend":
+    def fit(self, X: pd.DataFrame, covariates=None) -> "MovingAverageTrend":
         trend = X.rolling(window=self.window, center=self.center, min_periods=1).mean()
         self._store_trend(X, trend)
         return self
@@ -254,11 +255,11 @@ class HPFilterTrend(NonParametricTrend):
         super().__init__(extrapolation)
         self.lamb = lamb
 
-    def fit(self, X: pd.DataFrame) -> "HPFilterTrend":
-        X_filled, mask = _handle_nan(X)
+    def fit(self, X: pd.DataFrame, covariates=None) -> "HPFilterTrend":
+        x_filled, mask = _handle_nan(X)
         trend_data = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
         for col in X.columns:
-            _, trend_col = hpfilter(X_filled[col].values, lamb=self.lamb)
+            _, trend_col = hpfilter(x_filled[col].values, lamb=self.lamb)
             trend_data[col] = trend_col
         trend_data = _restore_nan(trend_data, mask)
         self._store_trend(X, trend_data)
@@ -280,11 +281,11 @@ class STLTrend(NonParametricTrend):
         super().__init__(extrapolation)
         self.period = period
 
-    def fit(self, X: pd.DataFrame) -> "STLTrend":
-        X_filled, mask = _handle_nan(X)
+    def fit(self, X: pd.DataFrame, covariates=None) -> "STLTrend":
+        x_filled, mask = _handle_nan(X)
         trend_data = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
         for col in X.columns:
-            stl = STL(X_filled[col], period=self.period)
+            stl = STL(x_filled[col], period=self.period)
             res = stl.fit()
             trend_data[col] = res.trend
         trend_data = _restore_nan(trend_data, mask)
@@ -308,7 +309,7 @@ class EMDTrend(NonParametricTrend):
     def __init__(self, extrapolation: str = 'constant'):
         super().__init__(extrapolation)
 
-    def fit(self, X: pd.DataFrame) -> "EMDTrend":
+    def fit(self, X: pd.DataFrame, covariates=None) -> "EMDTrend":
         try:
             from PyEMD import EMD
         except ImportError:
@@ -316,11 +317,11 @@ class EMDTrend(NonParametricTrend):
                 "EMDTrend requires the PyEMD package. "
                 "Install it with: pip install EMD-signal"
             )
-        X_filled, mask = _handle_nan(X)
+        x_filled, mask = _handle_nan(X)
         trend_data = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
         emd = EMD()
         for col in X.columns:
-            imfs = emd.emd(X_filled[col].values)
+            imfs = emd.emd(x_filled[col].values)
             trend_data[col] = imfs[-1]
         trend_data = _restore_nan(trend_data, mask)
         self._store_trend(X, trend_data)
@@ -351,13 +352,13 @@ class HighPassFilterTrend(NonParametricTrend):
         self.fs = fs
         self.order = order
 
-    def fit(self, X: pd.DataFrame) -> "HighPassFilterTrend":
-        X_filled, mask = _handle_nan(X)
+    def fit(self, X: pd.DataFrame, covariates=None) -> "HighPassFilterTrend":
+        x_filled, mask = _handle_nan(X)
         b, a = butter(N=self.order, Wn=self.cutoff, btype='high', fs=self.fs)
         trend_data = pd.DataFrame(index=X.index, columns=X.columns, dtype=float)
         for col in X.columns:
-            filtered = filtfilt(b, a, X_filled[col].values)
-            trend_data[col] = X_filled[col].values - filtered
+            filtered = filtfilt(b, a, x_filled[col].values)
+            trend_data[col] = x_filled[col].values - filtered
         trend_data = _restore_nan(trend_data, mask)
         self._store_trend(X, trend_data)
         return self

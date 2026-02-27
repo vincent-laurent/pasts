@@ -128,7 +128,7 @@ def run_scenario_store_level():
 
     # Decomposition: remove trend
     signal.decompose()
-    signal.residual -= LinearTrend().fit(signal.data)
+    signal.residual -= LinearTrend()
     signal.data["store_53"].plot()
     
 
@@ -147,7 +147,6 @@ def run_scenario_store_level():
     # Aggregated model
     signal.apply_model(AggregatedModel(
         {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=30)},
-        test_data=signal.test_data,
     ))
     signal.compute_scores(axis=1)
     signal.compute_conf_intervals(window_size=7)
@@ -195,7 +194,7 @@ def run_scenario_family_store():
     signal.validation_split(timestamp=timestamp)
 
     signal.decompose()
-    signal.residual -= LinearTrend().fit(signal.data)
+    signal.residual -= LinearTrend()
 
     print(_MSG_FIT_ES)
     signal.apply_model(ExponentialSmoothing())
@@ -209,7 +208,6 @@ def run_scenario_family_store():
 
     signal.apply_model(AggregatedModel(
         {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=14)},
-        test_data=signal.test_data,
     ))
     signal.compute_scores(axis=1)
     signal.compute_conf_intervals(window_size=7)
@@ -299,7 +297,7 @@ def run_scenario_curated_items():
     signal.validation_split(timestamp=timestamp)
 
     signal.decompose()
-    signal.residual -= LinearTrend().fit(signal.data)
+    signal.residual -= LinearTrend()
 
     print(_MSG_FIT_ES)
     signal.apply_model(ExponentialSmoothing())
@@ -313,7 +311,6 @@ def run_scenario_curated_items():
 
     signal.apply_model(AggregatedModel(
         {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=14)},
-        test_data=signal.test_data,
     ))
     signal.compute_scores(axis=1)
     signal.compute_conf_intervals(window_size=7)
@@ -361,7 +358,7 @@ def run_scenario_scale_test(n_items=50):
     signal.validation_split(timestamp=timestamp)
 
     signal.decompose()
-    signal.residual -= LinearTrend().fit(signal.data)
+    signal.residual -= LinearTrend()
 
     print(_MSG_FIT_ES)
     t0 = time.time()
@@ -383,7 +380,6 @@ def run_scenario_scale_test(n_items=50):
 
     signal.apply_model(AggregatedModel(
         {'ExponentialSmoothing': ExponentialSmoothing(), 'RandomForest': RandomForest(lags=14)},
-        test_data=signal.test_data,
     ))
     signal.compute_scores(axis=1)
 

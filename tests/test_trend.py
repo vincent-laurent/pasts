@@ -107,8 +107,7 @@ class TestMovingAverageTrend:
     def test_decomposition_workflow(self, univariate_ts):
         signal = Signal(univariate_ts)
         signal.decompose()
-        m = MovingAverageTrend(window=12).fit(signal.data)
-        signal.residual -= m
+        signal.residual -= MovingAverageTrend(window=12)
         residual = signal.residual.data
         # Residual should have reduced variance (trend removed)
         assert residual.std().iloc[0] < univariate_ts.std().iloc[0]
@@ -172,8 +171,7 @@ class TestSTLTrend:
     def test_decomposition_workflow(self, univariate_ts):
         signal = Signal(univariate_ts)
         signal.decompose()
-        m = STLTrend(period=12).fit(signal.data)
-        signal.residual -= m
+        signal.residual -= STLTrend(period=12)
         residual = signal.residual.data
         assert residual.std().iloc[0] < univariate_ts.std().iloc[0]
 

@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pandas as pd
 from pandas import MultiIndex
 from sklearn.metrics import root_mean_squared_error
@@ -40,6 +42,10 @@ class AggregatedModel(TimeSeriesModel):
     ``Signal.apply_model()`` and the standard ``fit`` / ``reverse_transform``
     cycle handles everything.
 
+    Weights are computed automatically during :meth:`fit` via an internal
+    hold-out split on the training data (no test data is ever seen by the
+    model).
+
     Parameters
     ----------
     models : dict[str, TimeSeriesModel]
@@ -47,22 +53,28 @@ class AggregatedModel(TimeSeriesModel):
     weights : pd.DataFrame, optional
         Pre-computed weights (index=units, columns=model names).
         If *None*, weights are computed automatically during :meth:`fit`
-        using *test_data*.
-    test_data : pd.DataFrame, optional
-        Actual test values used to compute RMSE-based weights during
-        :meth:`fit`.  Required when *weights* is not provided.
+        using an internal validation split.
+    val_ratio : float, optional
+        Fraction of training data to hold out for internal weight
+        computation (default ``0.2``).  Ignored when *weights* is provided.
+    min_train_size : int, optional
+        Minimum number of rows required for the internal training split
+        (default ``10``).  Raises ``ValueError`` if the dataset is too
+        small after the hold-out.
     """
 
     def __init__(self, models: dict[str, TimeSeriesModel],
                  weights: pd.DataFrame = None,
-                 test_data: pd.DataFrame = None):
+                 val_ratio: float = 0.2,
+                 min_train_size: int = 10):
         from pasts.components.darts_model import DartsModel
         self._models = {
             name: model if isinstance(model, TimeSeriesModel) else DartsModel(model)
             for name, model in models.items()
         }
         self._weights = weights
-        self._test_data = test_data
+        self._val_ratio = val_ratio
+        self._min_train_size = min_train_size
 
     @property
     def nan_safe(self) -> bool:
@@ -82,26 +94,67 @@ class AggregatedModel(TimeSeriesModel):
     def weights(self, value: pd.DataFrame):
         self._weights = value
 
-    def fit(self, X) -> "AggregatedModel":
+    def fit(self, X, covariates=None) -> "AggregatedModel":
         """Fit all sub-models on *X*.
 
-        If weights have not been provided or computed yet and *test_data*
-        was given at construction, computes RMSE-based weights from the
-        sub-models' predictions vs. the stored test data.
+        When weights are not pre-computed, an internal hold-out split is
+        used to estimate RMSE-based weights.  Sub-models are then refitted
+        on the full training data *X*.
 
         Parameters
         ----------
         X : pd.DataFrame or DataCube
             Training data.  Passed to each sub-model's ``fit()``.
+        covariates : :class:`~pasts.covariates.Covariates`, optional
+            Covariates forwarded to each sub-model's ``fit()``.
         """
+        from pasts.core.datacube import DataCube
+        if isinstance(X, DataCube):
+            X = X.data
+
+        if self._weights is not None:
+            for model in self._models.values():
+                model.fit(X, covariates=covariates)
+            return self
+
+        if len(self._models) == 1:
+            for model in self._models.values():
+                model.fit(X, covariates=covariates)
+            name = next(iter(self._models))
+            self._weights = pd.DataFrame({name: 1.0}, index=X.columns)
+            return self
+
+        # Internal hold-out for weight computation
+        n_val = max(2, int(len(X) * self._val_ratio))
+        n_train = len(X) - n_val
+        if n_train < self._min_train_size:
+            raise ValueError(
+                f"Training data too small for internal validation: "
+                f"{len(X)} rows with val_ratio={self._val_ratio} "
+                f"leaves only {n_train} training rows "
+                f"(minimum: {self._min_train_size})."
+            )
+        train_int = X.iloc[:n_train]
+        val_int = X.iloc[n_train:]
+
+        models_tmp = {
+            name: copy.deepcopy(m) for name, m in self._models.items()
+        }
+        # Darts accepts covariates longer than the training series
+        for m in models_tmp.values():
+            m.fit(train_int, covariates=covariates)
+        predictions = {
+            name: m.reverse_transform(len(val_int))
+            for name, m in models_tmp.items()
+        }
+        for name in predictions:
+            if len(predictions[name]) == len(val_int):
+                predictions[name].index = val_int.index
+        self._weights = self.compute_weights(predictions, val_int)
+
+        # Refit all sub-models on the full training data
         for model in self._models.values():
-            model.fit(X)
-        if self._weights is None and self._test_data is not None:
-            predictions = {
-                name: m.reverse_transform(len(self._test_data))
-                for name, m in self._models.items()
-            }
-            self._weights = self.compute_weights(predictions, self._test_data)
+            model.fit(X, covariates=covariates)
         return self
 
     def reverse_transform(self, i: int) -> pd.DataFrame:

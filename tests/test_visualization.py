@@ -27,7 +27,7 @@ def test_plot_signal(get_univariate_data, get_multivariate_data):
 
     # With decomposition
     signal.decompose()
-    signal.residual -= LinearTrend().fit(signal.data)
+    signal.residual -= LinearTrend()
     fig = signal.plot()
     assert isinstance(fig, matplotlib.figure.Figure)
     plt.close(fig)
@@ -57,7 +57,6 @@ def test_show_forecast(get_univariate_data):
     signal.validation_split(tstamp)
     signal.apply_model(AggregatedModel(
         {'AutoARIMA': AutoARIMA(), 'ExponentialSmoothing': ExponentialSmoothing()},
-        test_data=signal.test_data,
     ))
     signal.forecast('AggregatedModel', 12)
 
