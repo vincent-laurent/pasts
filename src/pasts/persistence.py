@@ -17,8 +17,17 @@ import joblib
 import pandas as pd
 
 
+_TRAIN_FIELDS = [
+    'estimator_on_train', 'predictions', 'best_parameters', 'scores',
+    'test_residuals', 'test_confidence_interval', 'historical_residuals',
+]
+_FULL_FIELDS = [
+    'estimator_on_all', 'forecast_data', 'forecast_confidence_interval',
+]
+
+
 def save_model(path: str, model_name: str, model_data, suffix: str = "train") -> None:
-    """Save a model entry to a joblib file.
+    """Save only the relevant fields for the given phase.
 
     Parameters
     ----------
@@ -26,18 +35,30 @@ def save_model(path: str, model_name: str, model_data, suffix: str = "train") ->
         Directory where the file will be written.
     model_name : str
         Name used in the filename (e.g. ``"ExponentialSmoothing"``).
-    model_data : ModelResult or dict
-        The model result (predictions, model, scores, …).
+    model_data : ModelResult
+        The model result container.
     suffix : str
-        ``"train"`` or ``"final"``.
+        ``"train"`` saves train-phase fields,
+        ``"final"`` saves full-data-phase fields.
     """
-    joblib.dump(model_data, os.path.join(path, f'{model_name}_{suffix}_jlib'))
+    fields = _TRAIN_FIELDS if suffix == "train" else _FULL_FIELDS
+    payload = {f: getattr(model_data, f, None) for f in fields}
+    joblib.dump(payload, os.path.join(path, f'{model_name}_{suffix}_jlib'))
 
 
 def save_common_data(path: str, train_data: pd.DataFrame, test_data: pd.DataFrame) -> None:
     """Save train and test DataFrames to joblib files."""
     joblib.dump(test_data, os.path.join(path, 'test_data_jlib'))
     joblib.dump(train_data, os.path.join(path, 'train_data_jlib'))
+
+
+def _merge_payload(model_result, payload: dict) -> None:
+    """Merge a dict payload into an existing ModelResult."""
+    if not isinstance(payload, dict):
+        return
+    for key, value in payload.items():
+        if value is not None:
+            setattr(model_result, key, value)
 
 
 def _load_saved_file(file: str, filename: str, models: dict,
@@ -66,16 +87,26 @@ def _load_saved_file(file: str, filename: str, models: dict,
             set_train(joblib.load(file))
         return
 
+    from pasts.core.model_result import ModelResult
+
     match_final = re.search(r'(.+)_final_jlib', filename)
     if match_final:
-        models[match_final.group(1)] = joblib.load(file)
+        name = match_final.group(1)
+        payload = joblib.load(file)
+        if name not in models:
+            models[name] = ModelResult(**payload) if isinstance(payload, dict) else payload
+        else:
+            _merge_payload(models[name], payload)
         return
 
     match_train = re.search(r'(.+)_train_jlib', filename)
     if match_train:
         name = match_train.group(1)
-        if name not in models or 'forecast' not in models[name]:
-            models[name] = joblib.load(file)
+        payload = joblib.load(file)
+        if name not in models:
+            models[name] = ModelResult(**payload) if isinstance(payload, dict) else payload
+        else:
+            _merge_payload(models[name], payload)
         return
 
     warnings.warn(f"File {filename} does not correspond to a saved model.")

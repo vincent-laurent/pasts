@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-import copy
-import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -28,61 +26,42 @@ class ModelResult:
     For model-specific attributes (e.g. ``weights``, ``models`` on
     :class:`AggregatedModel`), ``__getitem__`` delegates to ``self.model``.
 
-    Call :meth:`forecast` to lazily refit the model on the full dataset
-    and produce a forecast::
-
-        result.forecast(horizon)           # refit + forecast
-        result.forecast_data               # stored DataFrame
+    Attributes
+    ----------
+    estimator_on_train : TimeSeriesModel
+        The model fitted on **training data only**.
+    predictions : pd.DataFrame
+        Predictions covering the test period (model fitted on train).
+    estimator_on_all : TimeSeriesModel or None
+        The model refitted on **full data** (train + test).
+        Populated by :meth:`Signal.refit`.
+    forecast_data : pd.DataFrame or None
+        Forecasts produced after :meth:`Signal.refit` + :meth:`Signal.forecast`.
     """
 
-    model: object
+    estimator_on_train: object = None
     predictions: Optional[pd.DataFrame] = None
     best_parameters: object = "default"
     scores: dict = field(default_factory=lambda: {'unit_wise': {}, 'time_wise': {}})
-    final_estimator: object = None
+    estimator_on_all: object = None
     forecast_data: Optional[pd.DataFrame] = None
     test_residuals: Optional[pd.DataFrame] = None
     test_confidence_interval: Optional[pd.DataFrame] = None
     forecast_confidence_interval: Optional[pd.DataFrame] = None
     historical_residuals: Optional[pd.DataFrame] = None
+    fitted_values: Optional[pd.DataFrame] = None
 
-    # Data references for lazy refit (set by Signal)
+    # Data references (set by Signal)
     _data: object = field(default=None, repr=False)
     _covariates: object = field(default=None, repr=False)
 
-    # -- forecast ----------------------------------------------------------
-
-    def _ensure_final_estimator(self) -> None:
-        """Lazily refit the model on the full dataset."""
-        if self.final_estimator is None:
-            warnings.warn(f"Fitting model {self.model.name} on whole dataset...")
-            self.final_estimator = copy.deepcopy(self.model)
-            self.final_estimator.fit(self._data, covariates=self._covariates)
-
-    def forecast(self, horizon: int) -> pd.DataFrame:
-        """Lazily refit the model on full data and forecast.
-
-        On the first call, deep-copies the model, refits it on
-        ``_data`` (the full signal), and stores it as
-        ``final_estimator``.  Subsequent calls with a different
-        horizon reuse the already-fitted estimator.
-
-        Parameters
-        ----------
-        horizon : int
-            Number of steps to forecast.
-
-        Returns
-        -------
-        pd.DataFrame
-        """
-        self._ensure_final_estimator()
-        self.forecast_data = self.final_estimator.forecast(horizon)
-        return self.forecast_data
-
     # -- dict-like compat ------------------------------------------------
 
-    _FIELD_ALIASES = {"forecast": "forecast_data"}
+    _FIELD_ALIASES = {
+        "forecast": "forecast_data",
+        "model": "estimator_on_train",
+        "final_estimator": "estimator_on_all",
+    }
 
     def __getitem__(self, key):
         key = self._FIELD_ALIASES.get(key, key)
@@ -90,7 +69,7 @@ class ModelResult:
         if val is not None:
             return val
         # Delegate to the model (e.g. AggregatedModel.weights, .models)
-        return getattr(self.model, key, None)
+        return getattr(self.estimator_on_train, key, None)
 
     def __setitem__(self, key, value):
         key = self._FIELD_ALIASES.get(key, key)
@@ -101,14 +80,14 @@ class ModelResult:
         val = getattr(self, key, None)
         if val is not None:
             return True
-        return getattr(self.model, key, None) is not None
+        return getattr(self.estimator_on_train, key, None) is not None
 
     def __len__(self):
         """Count of non-None essential fields (backward compat with tests)."""
         return sum(
             1 for f in [
-                'model', 'predictions', 'best_parameters', 'scores',
-                'final_estimator', 'forecast_data',
+                'estimator_on_train', 'predictions', 'best_parameters', 'scores',
+                'estimator_on_all', 'forecast_data',
             ]
             if getattr(self, f, None) is not None
         )

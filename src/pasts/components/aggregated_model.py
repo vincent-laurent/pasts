@@ -61,12 +61,18 @@ class AggregatedModel(TimeSeriesModel):
         Minimum number of rows required for the internal training split
         (default ``10``).  Raises ``ValueError`` if the dataset is too
         small after the hold-out.
+    decomposition : :class:`~pasts.core.decomposition.Decomposition`, optional
+        When provided, :meth:`fit` replays the decomposition on the
+        training data first and fits the sub-models on the residual.
+        :meth:`forecast` then recomposes predictions back to the
+        original signal space.
     """
 
     def __init__(self, models: dict[str, TimeSeriesModel],
                  weights: pd.DataFrame = None,
                  val_ratio: float = 0.2,
-                 min_train_size: int = 10):
+                 min_train_size: int = 10,
+                 decomposition=None):
         from pasts.components.darts_model import DartsModel
         self._models = {
             name: model if isinstance(model, TimeSeriesModel) else DartsModel(model)
@@ -75,6 +81,7 @@ class AggregatedModel(TimeSeriesModel):
         self._weights = weights
         self._val_ratio = val_ratio
         self._min_train_size = min_train_size
+        self._decomposition = decomposition
 
     @property
     def nan_safe(self) -> bool:
@@ -112,6 +119,10 @@ class AggregatedModel(TimeSeriesModel):
         if isinstance(X, DataCube):
             X = X.data
 
+        if self._decomposition is not None:
+            self._decomposition.fit(X, covariates=covariates)
+            X = self._decomposition.residual
+
         if self._weights is not None:
             for model in self._models.values():
                 model.fit(X, covariates=covariates)
@@ -144,7 +155,7 @@ class AggregatedModel(TimeSeriesModel):
         for m in models_tmp.values():
             m.fit(train_int, covariates=covariates)
         predictions = {
-            name: m.reverse_transform(len(val_int))
+            name: m.forecast(len(val_int))
             for name, m in models_tmp.items()
         }
         for name in predictions:
@@ -164,6 +175,32 @@ class AggregatedModel(TimeSeriesModel):
             for name, model in self._models.items()
         }
         return _weighted_aggregate(predictions, self._weights)
+
+    def forecast(self, horizon: int) -> pd.DataFrame:
+        """Forecast the next *horizon* steps.
+
+        Always delegates to each sub-model's ``forecast()``, so that each
+        sub-model handles its own decomposition recomposition.  If this
+        aggregated model also has its own decomposition, it is applied on
+        top of the aggregated result.
+
+        Parameters
+        ----------
+        horizon : int
+            Number of steps to forecast.
+
+        Returns
+        -------
+        pd.DataFrame
+        """
+        predictions = {
+            name: model.forecast(horizon)
+            for name, model in self._models.items()
+        }
+        result = _weighted_aggregate(predictions, self._weights)
+        if self._decomposition is not None:
+            return self._decomposition.recompose(result, horizon)
+        return result
 
     @staticmethod
     def compute_weights(

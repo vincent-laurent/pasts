@@ -13,7 +13,9 @@
 Three methods are available:
 
 - **empirical** (``empirical_pi``): Gaussian assumption ``pred ± z × σ``.
-- **bootstrap** (``bootstrap_pi``): resample historical residuals (no refit).
+- **bootstrap** (``bootstrap_pi``): resample test residuals (no refit).
+  For forecast intervals, ``bootstrap_scaled_pi`` applies horizon-dependent
+  scaling estimated from the rolling std of test residuals.
 - **bootstrap_full** (``bootstrap_full_pi``): block-bootstrap training data,
   refit the model *B* times, take quantiles of the *B* prediction paths.
 
@@ -187,6 +189,55 @@ def _block_bootstrap(residuals_df, block_size, n_obs, rng):
     return np.concatenate(blocks, axis=0)[:n_obs]
 
 
+def _rolling_sigma(residuals: pd.DataFrame, window: int = None) -> pd.DataFrame:
+    """Estimate sigma(h) via rolling std on time-ordered residuals.
+
+    Parameters
+    ----------
+    residuals : pd.DataFrame
+        Time-ordered test residuals (actual - predicted).
+    window : int or None
+        Rolling window size. Default: ``max(3, len(residuals) // 5)``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Rolling std, same shape as *residuals*. Back-filled for leading NaN.
+    """
+    if window is None:
+        window = max(3, len(residuals) // 5)
+    rolling_std = residuals.rolling(window=window, min_periods=1).std()
+    return rolling_std.bfill()
+
+
+def _extrapolate_sigma(sigma_h: np.ndarray, n_forecast: int) -> np.ndarray:
+    """Extrapolate a sigma(h) profile beyond the test period.
+
+    Fits a simple linear regression on the sigma(h) values and extends
+    it for *n_forecast* additional steps, floored at the last observed value.
+
+    Parameters
+    ----------
+    sigma_h : np.ndarray
+        1-D array of sigma values over the test period.
+    n_forecast : int
+        Number of forecast steps to extrapolate.
+
+    Returns
+    -------
+    np.ndarray
+        1-D array of length *n_forecast*.
+    """
+    n = len(sigma_h)
+    x = np.arange(n, dtype=float)
+    # Simple linear fit
+    slope, intercept = np.polyfit(x, sigma_h, 1)
+    x_forecast = np.arange(n, n + n_forecast, dtype=float)
+    extrapolated = intercept + slope * x_forecast
+    # Floor at last observed sigma (intervals should not shrink)
+    return np.maximum(extrapolated, sigma_h[-1])
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap — residual resampling (no refit)
 # ---------------------------------------------------------------------------
@@ -255,6 +306,103 @@ def bootstrap_pi(
         for b in range(n_bootstrap):
             resampled = _block_bootstrap(pool_df, block_size, n_steps, rng)
             samples[b] = vals + resampled[:, 0]
+
+        lower = np.percentile(samples, lower_q * 100, axis=0)
+        upper = np.percentile(samples, upper_q * 100, axis=0)
+        df_ci[col] = list(zip(lower, upper))
+
+    return df_ci
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap — residual resampling with horizon-dependent scaling
+# ---------------------------------------------------------------------------
+
+def bootstrap_scaled_pi(
+    pred: pd.DataFrame,
+    test_residuals: pd.DataFrame,
+    n_bootstrap: int = 1000,
+    alpha: float = 0.05,
+    block_size: int = None,
+    window: int = None,
+    random_state=None,
+) -> pd.DataFrame:
+    """Bootstrap prediction intervals with horizon-dependent scaling.
+
+    Like :func:`bootstrap_pi`, but scales resampled residuals so that the
+    interval width grows with the forecast horizon.  The scaling profile
+    ``sigma(h)`` is estimated from the rolling standard deviation of
+    time-ordered *test_residuals*.  For forecast horizons beyond the test
+    period, the profile is linearly extrapolated.
+
+    Parameters
+    ----------
+    pred : pd.DataFrame
+        Point forecasts (n_steps, n_series).
+    test_residuals : pd.DataFrame
+        Time-ordered test residuals (actual - predicted on the test set).
+    n_bootstrap : int
+        Number of bootstrap iterations (default 1000).
+    alpha : float
+        Significance level (default 0.05 → 95 % CI).
+    block_size : int or None
+        Block length for block bootstrap.  ``None`` uses
+        ``int(sqrt(n_residuals))``.  Set to ``1`` for i.i.d. resampling.
+    window : int or None
+        Rolling window size for sigma(h) estimation.
+        ``None`` uses ``max(3, len(test_residuals) // 5)``.
+    random_state : int or None
+        Seed for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same shape/index as *pred*.  Each cell is a ``(lower, upper)`` tuple.
+    """
+    rng = np.random.default_rng(random_state)
+    n_steps = len(pred)
+    lower_q = alpha / 2
+    upper_q = 1 - alpha / 2
+
+    if not isinstance(test_residuals, pd.DataFrame):
+        test_residuals = pd.DataFrame(test_residuals)
+
+    n_res = len(test_residuals)
+    if block_size is None:
+        block_size = max(1, int(np.sqrt(n_res)))
+
+    # Compute rolling sigma profile on the test residuals
+    sigma_profile = _rolling_sigma(test_residuals, window=window)
+
+    df_ci = pd.DataFrame(index=pred.index, columns=pred.columns)
+
+    for col in pred.columns:
+        pool = _extract_residual_pool(test_residuals, col)
+        vals = pred[col].values.astype(float)
+
+        # Sigma profile for this column
+        if col in sigma_profile.columns:
+            sigma_h_test = sigma_profile[col].values.astype(float)
+        else:
+            sigma_h_test = sigma_profile.iloc[:, 0].values.astype(float)
+        sigma_global = np.std(pool)
+        if sigma_global == 0:
+            sigma_global = 1.0
+
+        # Build scaling factors for the forecast horizon
+        if n_steps <= n_res:
+            # Forecast shorter than test: use test profile directly
+            scale = sigma_h_test[:n_steps] / sigma_global
+        else:
+            # Forecast longer than test: extrapolate
+            extrapolated = _extrapolate_sigma(sigma_h_test, n_steps - n_res)
+            scale = np.concatenate([sigma_h_test, extrapolated]) / sigma_global
+
+        pool_df = pd.DataFrame(pool, columns=["res"])
+        samples = np.empty((n_bootstrap, n_steps))
+        for b in range(n_bootstrap):
+            resampled = _block_bootstrap(pool_df, block_size, n_steps, rng)
+            samples[b] = vals + resampled[:, 0] * scale
 
         lower = np.percentile(samples, lower_q * 100, axis=0)
         upper = np.percentile(samples, upper_q * 100, axis=0)
@@ -339,7 +487,7 @@ def bootstrap_full_pi(
         )
         model_copy = copy.deepcopy(model)
         model_copy.fit(bootstrap_train, covariates=covariates)
-        preds_b = model_copy.reverse_transform(pred_length)
+        preds_b = model_copy.forecast(pred_length)
         all_preds[b] = preds_b.values[:pred_length]
 
     lower_q = alpha / 2
@@ -380,28 +528,11 @@ class CIAccessor:
 
     # -- internal helpers ---------------------------------------------------
 
-    def _resolve_bootstrap_context(self, model_name, result):
-        """Return ``(model, train_data)`` for bootstrap residual computation.
-
-        For decomposition entries (``"decomp__model"``), the model lives in
-        the residual space, so we use the decomposition's training data.
-        """
-        sig = self._signal
-        if '__' in model_name and model_name in sig.models:
-            decomp_name, sub_model_name = model_name.split('__', 1)
-            if decomp_name in sig._decompositions:
-                decomp_signal = sig._decompositions[decomp_name]
-                decomp_result = decomp_signal.models.get(sub_model_name)
-                if decomp_result is not None:
-                    return decomp_result.model, decomp_signal.train_data
-        return result.model, sig.train_data
-
     def _ensure_historical_residuals(self, model_name, result):
         """Lazily compute and cache historical residuals on *result*."""
         if result.historical_residuals is None:
-            model, train_data = self._resolve_bootstrap_context(
-                model_name, result
-            )
+            model = result.estimator_on_train
+            train_data = self._signal.train_data
             result.historical_residuals = model.compute_historical_residuals(
                 train_data
             )
@@ -433,19 +564,15 @@ class CIAccessor:
                 pred, result.test_residuals, scaling=scaling
             )
         elif method == "bootstrap":
-            hist_res = self._ensure_historical_residuals(model_name, result)
             result.test_confidence_interval = bootstrap_pi(
-                pred, hist_res,
+                pred, result.test_residuals,
                 n_bootstrap=n_bootstrap, alpha=alpha,
                 block_size=block_size, random_state=random_state,
             )
         elif method == "bootstrap_full":
             hist_res = self._ensure_historical_residuals(model_name, result)
-            model, train_data = self._resolve_bootstrap_context(
-                model_name, result
-            )
             result.test_confidence_interval = bootstrap_full_pi(
-                model, train_data, pred, hist_res,
+                result.estimator_on_train, sig.train_data, pred, hist_res,
                 covariates=sig._covariates,
                 n_bootstrap=n_bootstrap, alpha=alpha,
                 block_size=block_size, random_state=random_state,
@@ -467,18 +594,19 @@ class CIAccessor:
                 result.forecast_data, result.test_residuals, scaling=scaling
             )
         elif method == "bootstrap":
-            hist_res = self._ensure_historical_residuals(model_name, result)
-            result.forecast_confidence_interval = bootstrap_pi(
-                result.forecast_data, hist_res,
+            if result.test_residuals is None:
+                self._compute_test_residuals(result, sig.test_data)
+            result.forecast_confidence_interval = bootstrap_scaled_pi(
+                result.forecast_data, result.test_residuals,
                 n_bootstrap=n_bootstrap, alpha=alpha,
                 block_size=block_size, random_state=random_state,
             )
         elif method == "bootstrap_full":
-            result._ensure_final_estimator()
-            final_est = result.final_estimator
-            full_hist_res = final_est.compute_historical_residuals(sig.data)
+            final_est = result.estimator_on_all if result.estimator_on_all is not None else result.estimator_on_train
+            ref_data = sig.data if result.estimator_on_all is not None else sig.train_data
+            full_hist_res = final_est.compute_historical_residuals(ref_data)
             result.forecast_confidence_interval = bootstrap_full_pi(
-                final_est, sig.data, result.forecast_data, full_hist_res,
+                final_est, ref_data, result.forecast_data, full_hist_res,
                 covariates=sig._covariates,
                 n_bootstrap=n_bootstrap, alpha=alpha,
                 block_size=block_size, random_state=random_state,
@@ -510,13 +638,16 @@ class CIAccessor:
             ``"empirical"``
                 Gaussian: ``pred ± z × σ``.  Uses test-set residuals.
             ``"bootstrap"``
-                Block-resample historical residuals (no refit).
-                Preserves temporal correlation via block bootstrap.
+                Block-resample test residuals (no refit).
+                For test intervals, residuals are resampled and added to
+                predictions.  For forecast intervals, resampled residuals
+                are scaled by a horizon-dependent factor estimated from the
+                rolling std of test residuals (see :func:`bootstrap_scaled_pi`).
             ``"bootstrap_full"``
                 Block-bootstrap training data, refit *B* times, take
                 quantiles of the *B* prediction paths.
         n_bootstrap : int, optional
-            Number of bootstrap iterations (default 1000).
+            Number of bootstrap iterations (default 200).
             Ignored when ``method="empirical"``.
         alpha : float, optional
             Significance level (default 0.05 → 95 % CI).

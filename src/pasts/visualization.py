@@ -57,6 +57,28 @@ def _ts_to_df(model_entry: dict, key: str) -> pd.DataFrame:
     return model_entry[key]
 
 
+def _get_fitted(model_result, train_data: pd.DataFrame) -> pd.DataFrame:
+    """Return fitted values (in-sample predictions), computing and caching if needed.
+
+    For models with a decomposition, returns the trend component
+    (``train_data - residual``).  For plain models, returns the full
+    in-sample reconstruction via ``compute_historical_residuals``.
+    """
+    if model_result.fitted_values is not None:
+        return model_result.fitted_values
+    decomp = getattr(model_result.estimator_on_train, '_decomposition', None)
+    if decomp is not None and getattr(decomp, '_residual', None) is not None:
+        residual = decomp._residual
+        if len(residual) == len(train_data):
+            residual = residual.set_axis(train_data.index)
+        fitted = train_data - residual
+    else:
+        residuals = model_result.estimator_on_train.compute_historical_residuals(train_data)
+        fitted = train_data.loc[residuals.index] - residuals
+    model_result.fitted_values = fitted
+    return fitted
+
+
 class PlotAccessor:
     """Accessor for Signal.plot that provides a fluent plotting API.
 
@@ -75,25 +97,25 @@ class PlotAccessor:
     def __init__(self, signal: Signal):
         self._signal = signal
 
-    def __call__(self, **kwargs) -> matplotlib.figure.Figure:
-        """Plot raw data and transformed data if operations have been applied.
+    def __call__(self, legend: bool = True, **kwargs) -> matplotlib.figure.Figure:
+        """Plot raw signal data.
+
+        Parameters
+        ----------
+        legend : bool
+            Whether to show the legend (default ``True``).
 
         Returns
         -------
         matplotlib.figure.Figure
         """
         fig, ax = plt.subplots()
-        legend = []
+        legend_labels = []
         self._signal.data.plot(ax=ax, **kwargs)
         for col in self._signal.data.columns:
-            legend.append(f'raw data: {col}')
-        if self._signal.residual is not None:
-            self._signal.residual.data.plot(ax=ax, **kwargs)
-            for col in self._signal.residual.data.columns:
-                legend.append(f'residual: {col}')
-            ax.set_title(f'Decomposition: {self._signal.decomposition}',
-                         fontsize=10)
-        ax.legend(legend)
+            legend_labels.append(f'raw data: {col}')
+        if legend:
+            ax.legend(legend_labels)
         return fig
 
     def acf(self) -> matplotlib.figure.Figure:
@@ -110,7 +132,9 @@ class PlotAccessor:
         return fig
 
     def predictions(self, aggregated_only: bool = False,
-                    backend: str = "matplotlib"
+                    backend: str = "matplotlib",
+                    show_fitted: bool = False,
+                    legend: bool = True,
                     ) -> Union[matplotlib.figure.Figure, go.Figure]:
         """Plot raw data and predicted values on same graph.
 
@@ -120,6 +144,10 @@ class PlotAccessor:
             If True, only plot the aggregated model predictions.
         backend : str
             "matplotlib" (default) or "plotly".
+        show_fitted : bool
+            If True, also plot in-sample fitted values on the training period.
+        legend : bool
+            Whether to show the legend (default ``True``).
 
         Returns
         -------
@@ -127,12 +155,15 @@ class PlotAccessor:
         """
         if backend == "plotly":
             return self._show_plotly(
-                'predictions', 'test_confidence_interval', aggregated_only)
+                'predictions', 'test_confidence_interval', aggregated_only,
+                show_fitted=show_fitted, legend=legend)
         return self._show(
-            'predictions', 'test_confidence_interval', aggregated_only)
+            'predictions', 'test_confidence_interval', aggregated_only,
+            show_fitted=show_fitted, legend=legend)
 
     def forecast(self, aggregated_only: bool = False,
-                 backend: str = "matplotlib"
+                 backend: str = "matplotlib",
+                 legend: bool = True,
                  ) -> Union[matplotlib.figure.Figure, go.Figure]:
         """Plot raw data and forecasted values (for future dates) on same graph.
 
@@ -142,6 +173,8 @@ class PlotAccessor:
             If True, only plot the aggregated model forecasts.
         backend : str
             "matplotlib" (default) or "plotly".
+        legend : bool
+            Whether to show the legend (default ``True``).
 
         Returns
         -------
@@ -150,15 +183,77 @@ class PlotAccessor:
         if backend == "plotly":
             return self._show_plotly(
                 'forecast', 'forecast_confidence_interval',
-                aggregated_only, prepend_last_obs=True)
+                aggregated_only, prepend_last_obs=True, legend=legend)
         return self._show(
             'forecast', 'forecast_confidence_interval',
-            aggregated_only, prepend_last_obs=True)
+            aggregated_only, prepend_last_obs=True, legend=legend)
+
+    def residuals(self, backend: str = "matplotlib",
+                  legend: bool = True,
+                  ) -> Union[matplotlib.figure.Figure, go.Figure]:
+        """Plot decomposition residuals (detrended signal) for each model.
+
+        Only models with an attached decomposition are shown.
+
+        Parameters
+        ----------
+        backend : str
+            "matplotlib" (default) or "plotly".
+        legend : bool
+            Whether to show the legend (default ``True``).
+
+        Returns
+        -------
+        matplotlib.figure.Figure or plotly.graph_objects.Figure
+        """
+        if not self._signal.models:
+            raise ValueError(_NO_PREDICTIONS_MSG)
+
+        items = []
+        for j, (name, result) in enumerate(self._signal.models.items()):
+            decomp = getattr(result.estimator_on_train, '_decomposition', None)
+            if decomp is None or getattr(decomp, '_residual', None) is None:
+                continue
+            residual = decomp._residual
+            if len(residual) == len(self._signal.train_data):
+                residual = residual.set_axis(self._signal.train_data.index)
+            items.append((j, name, residual))
+
+        if not items:
+            raise ValueError('No models with decomposition residuals found.')
+
+        if backend == "plotly":
+            fig = go.Figure()
+            for j, name, residual in items:
+                color = _pick_color(j)
+                for i, unit in enumerate(residual.columns):
+                    fig.add_trace(go.Scatter(
+                        x=residual.index, y=residual[unit], mode='lines',
+                        name=f'{name}_s{i + 1}', line={'color': color},
+                    ))
+            fig.update_layout(title='Residuals (detrended signal)',
+                              xaxis_title='Time', yaxis_title='Residual',
+                              showlegend=legend)
+            return fig
+
+        fig, ax = plt.subplots()
+        labels = []
+        n_signals = self._signal.train_data.shape[1]
+        for j, name, residual in items:
+            residual.plot(ax=ax, color=_pick_color(j), legend=False)
+            labels += [f'{name}_s{i}' for i in range(1, n_signals + 1)]
+        if legend:
+            ax.legend(labels)
+        ax.set_xlabel('time')
+        ax.set_ylabel('residual')
+        return fig
 
     # --- Internal shared rendering ---
 
     def _show(self, data_key: str, ci_key: str, aggregated_only: bool,
-              prepend_last_obs: bool = False) -> matplotlib.figure.Figure:
+              prepend_last_obs: bool = False,
+              show_fitted: bool = False,
+              legend: bool = True) -> matplotlib.figure.Figure:
         if not self._signal.models:
             raise ValueError(_NO_PREDICTIONS_MSG)
 
@@ -181,24 +276,38 @@ class PlotAccessor:
         else:
             to_plot = list(self._signal.models.keys())
 
-        for model in to_plot:
+        for j, model in enumerate(to_plot):
             if data_key not in self._signal.models[model]:
                 warnings.warn(f'No {data_key} have been computed with {model}')
                 continue
-            pred = _ts_to_df(self._signal.models[model], data_key)
+            model_result = self._signal.models[model]
+            pred = _ts_to_df(model_result, data_key)
             if prepend_last_obs:
-                pred = pd.concat([self._signal.data.iloc[-1:], pred])
-            pred.plot(ax=ax, legend=False)
+                if model_result.estimator_on_all is not None:
+                    anchor = self._signal.data.iloc[-1:]
+                else:
+                    anchor = self._signal.train_data.iloc[-1:]
+                pred = pd.concat([anchor, pred])
+            color = _pick_color(j)
+            pred.plot(ax=ax, color=color, legend=False)
             labels += [f'{model}_s{i}' for i in range(1, n_signals + 1)]
 
-        ax.legend(labels)
+            if show_fitted:
+                fitted = _get_fitted(self._signal.models[model], self._signal.train_data)
+                fitted.plot(ax=ax, color=color, linestyle='--', alpha=0.7, legend=False)
+                labels += [f'{model}_fitted_s{i}' for i in range(1, n_signals + 1)]
+
+        if legend:
+            ax.legend(labels)
         ax.set_xlabel('time')
         ax.set_ylabel('values')
         return fig
 
     def _show_plotly(self, data_key: str, ci_key: str,
                      aggregated_only: bool = False,
-                     prepend_last_obs: bool = False) -> go.Figure:
+                     prepend_last_obs: bool = False,
+                     show_fitted: bool = False,
+                     legend: bool = True) -> go.Figure:
         if not self._signal.models:
             raise ValueError(_NO_PREDICTIONS_MSG)
 
@@ -217,7 +326,6 @@ class PlotAccessor:
             models_to_plot = self._signal.models
 
         j = 0
-        last_obs = self._signal.data.iloc[-1:]
         for model_name, model_data in models_to_plot.items():
             if data_key not in model_data:
                 warnings.warn(f'No {data_key} have been computed with {model_name}')
@@ -225,7 +333,11 @@ class PlotAccessor:
 
             pred = _ts_to_df(model_data, data_key)
             if prepend_last_obs:
-                pred = pd.concat([last_obs, pred])
+                if model_data.estimator_on_all is not None:
+                    anchor = self._signal.data.iloc[-1:]
+                else:
+                    anchor = self._signal.train_data.iloc[-1:]
+                pred = pd.concat([anchor, pred])
 
             for i, unit in enumerate(pred.columns):
                 trace_color = _pick_color(j)
@@ -253,8 +365,18 @@ class PlotAccessor:
                         legendgroup=f'CI_{model_name}_s{i + 1}',
                         name=f'CI_{model_name}_s{i + 1}'
                     ))
+
+                if show_fitted:
+                    fitted = _get_fitted(model_data, self._signal.train_data)
+                    if unit in fitted.columns:
+                        fig.add_trace(go.Scatter(
+                            x=fitted.index, y=fitted[unit], mode='lines',
+                            name=f'{model_name}_fitted_s{i + 1}',
+                            line={'color': trace_color, 'dash': 'dash'},
+                            opacity=0.7,
+                        ))
                 j += 1
 
         title = 'Forecasts with Confidence Intervals' if prepend_last_obs else 'Predictions with Confidence Intervals'
-        fig.update_layout(title=title, xaxis_title='Time', yaxis_title='Values', showlegend=True)
+        fig.update_layout(title=title, xaxis_title='Time', yaxis_title='Values', showlegend=legend)
         return fig

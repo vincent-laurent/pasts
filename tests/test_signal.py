@@ -134,134 +134,10 @@ def test_forecast(get_univariate_data):
     signal.apply_model(AggregatedModel(
         {'AutoARIMA': AutoARIMA(), 'ExponentialSmoothing': ExponentialSmoothing()},
     ))
+    signal.refit('AggregatedModel')
     signal.forecast('AggregatedModel', 12)
     assert len(signal.models['AggregatedModel']['forecast']) == 12
     assert signal.models['AggregatedModel']['forecast'].index[0] > signal.data.index[-1]
-
-
-def test_decomposition_learn_forecast(get_univariate_data):
-    from pasts.components.trend import LinearTrend
-
-    signal = Signal(get_univariate_data, 'tests')
-    tstamp = '1958-12-01'
-    signal.validation_split(tstamp)
-    signal.decompose()
-
-    # Subtract trend from residual (auto-fitted on residual data)
-    signal.residual -= LinearTrend()
-
-    # Fit a model on the residual via apply_model
-    signal.residual.apply_model(ExponentialSmoothing())
-    assert 'ExponentialSmoothing' in signal.residual.models
-
-    # Forecast through decomposition using the unified API
-    signal.forecast('default__ExponentialSmoothing', 12)
-
-    assert 'default__ExponentialSmoothing' in signal.models
-    assert 'forecast' in signal.models['default__ExponentialSmoothing']
-    assert len(signal.models['default__ExponentialSmoothing']['forecast']) == 12
-    # Forecast index should be in the future
-    assert signal.models['default__ExponentialSmoothing']['forecast'].index[0] > signal.data.index[-1]
-
-
-def test_named_decompositions(get_univariate_data):
-    from pasts.components.trend import LinearTrend, MovingAverageTrend
-
-    signal = Signal(get_univariate_data, 'tests')
-    tstamp = '1958-12-01'
-    signal.validation_split(tstamp)
-
-    # Create two named decompositions
-    signal.decompose("linear")
-    signal.decompose("ma")
-
-    assert "linear" in signal.decompositions
-    assert "ma" in signal.decompositions
-    assert isinstance(signal.decompositions["linear"], Signal)
-    assert isinstance(signal.decompositions["ma"], Signal)
-
-    # Residual property still points to "default" (None if not created)
-    assert signal.residual is None
-
-    # Apply different trends to each named residual
-    signal.decompositions["linear"] -= LinearTrend()
-    signal.decompositions["ma"] -= MovingAverageTrend(12)
-
-    # Each residual has its own ops stack
-    assert len(signal.decompositions["linear"]._ops) == 1
-    assert len(signal.decompositions["ma"]._ops) == 1
-
-    # get_decomposition() returns the correct Decomposition
-    from pasts.core.decomposition import Decomposition
-    assert isinstance(signal.get_decomposition("linear"), Decomposition)
-    assert isinstance(signal.get_decomposition("ma"), Decomposition)
-    with pytest.raises(AttributeError):
-        signal.get_decomposition("nonexistent")
-
-    # Split is already propagated from parent signal — no need to call
-    # validation_split again on each decomposition.
-    signal.decompositions["linear"].apply_model(ExponentialSmoothing())
-    signal.decompositions["linear"].compute_scores()
-
-    signal.decompositions["ma"].apply_model(ExponentialSmoothing())
-    signal.decompositions["ma"].compute_scores()
-
-    # Forecast through named decomposition: forecast("decomp__model", horizon)
-    # → also composes test predictions into signal.models
-    signal.forecast("linear__ExponentialSmoothing", 12)
-    assert "linear__ExponentialSmoothing" in signal.models
-
-    entry = signal.models["linear__ExponentialSmoothing"]
-    # Forecast in future
-    assert len(entry["forecast"]) == 12
-    assert entry["forecast"].index[0] > signal.data.index[-1]
-    # Predictions composed back to original signal space
-    assert entry["predictions"] is not None
-    assert len(entry["predictions"]) == 24  # test set size
-    assert list(entry["predictions"].index) == list(signal.test_data.index)
-
-    # compute_scores works on composed predictions vs signal.test_data
-    signal.compute_scores()
-    assert signal.models["linear__ExponentialSmoothing"]["scores"]["unit_wise"] is not None
-
-    signal.forecast("ma__ExponentialSmoothing", 12)
-    assert "ma__ExponentialSmoothing" in signal.models
-
-    # Both forecasts coexist in signal.models
-    assert len([k for k in signal.models if "__" in k]) == 2
-
-    # Error when decomp_name or model_name not found
-    with pytest.raises(ValueError, match="No decomposition"):
-        signal.forecast("missing_decomp__ExponentialSmoothing", 12)
-    with pytest.raises(ValueError, match="has not been trained"):
-        signal.forecast("linear__AutoARIMA", 12)
-
-
-def test_multistep_decomposition_autofit(get_univariate_data):
-    """Multi-step decomposition: second model is fitted on the residual
-    after the first step, not on the original signal."""
-    from pasts.components.trend import LinearTrend, MovingAverageTrend
-
-    signal = Signal(get_univariate_data, 'tests')
-    signal.validation_split('1958-12-01')
-    signal.decompose("multi")
-
-    # Step 1: remove linear trend
-    signal.decompositions["multi"] -= LinearTrend()
-    residual_after_step1 = signal.decompositions["multi"].data.copy()
-
-    # Step 2: remove MA trend from residual (NOT from original signal)
-    signal.decompositions["multi"] -= MovingAverageTrend(12)
-
-    # The ops stack should have 2 entries
-    assert len(signal.decompositions["multi"]._ops) == 2
-
-    # Verify the second model was fitted on the post-step1 residual
-    second_model = signal.decompositions["multi"]._ops[1][2]
-    expected = MovingAverageTrend(12).fit(residual_after_step1)
-    expected_trend = expected.reverse_transform(-len(residual_after_step1))
-    actual_trend = second_model.reverse_transform(-len(residual_after_step1))
-    pd.testing.assert_frame_equal(actual_trend, expected_trend)
 
 
 def test_properties(get_univariate_data, get_multivariate_data):
@@ -449,35 +325,6 @@ def test_validation_accessor_cv(get_univariate_data):
     assert signal.validation.cv_tseries is not None
 
 
-def test_split_propagates_to_decompose_after(get_univariate_data):
-    """decompose() after validation_split() propagates the split automatically."""
-    signal = Signal(get_univariate_data)
-    tstamp = '1958-12-01'
-    signal.validation_split(tstamp)
-    signal.decompose("t")
-
-    decomp = signal.decompositions["t"]
-    assert decomp.train_data is not None
-    assert decomp.test_data is not None
-    assert decomp.train_data.shape[0] == signal.train_data.shape[0]
-    assert decomp.test_data.shape[0] == signal.test_data.shape[0]
-
-
-def test_split_propagates_to_decompose_before(get_univariate_data):
-    """decompose() before validation_split(): the shared accessor means the
-    decomposition sees the split as soon as it is set on the parent."""
-    signal = Signal(get_univariate_data)
-    tstamp = '1958-12-01'
-    signal.decompose("t")
-    assert signal.decompositions["t"].train_data is None  # not yet split
-
-    signal.validation_split(tstamp)
-    # Shared accessor — decomposition immediately reflects the split
-    decomp = signal.decompositions["t"]
-    assert decomp.train_data is not None
-    assert decomp.train_data.shape[0] == 120
-    assert decomp.test_data.shape[0] == 24
-
 
 # ---- Confidence interval tests -----------------------------------------
 
@@ -503,6 +350,7 @@ def _assert_ci_valid(ci_df, ref_df):
 def test_conf_intervals_empirical(get_univariate_data):
     """Existing empirical method still works (regression test)."""
     signal = _setup_signal_with_model(get_univariate_data)
+    signal.refit('ExponentialSmoothing')
     signal.forecast('ExponentialSmoothing', 12)
     signal.compute_conf_intervals(method="empirical")
 
@@ -513,19 +361,20 @@ def test_conf_intervals_empirical(get_univariate_data):
     assert result.historical_residuals is None
 
 
-def test_conf_intervals_default_is_bootstrap_full(get_univariate_data):
-    """Default (no method arg) is bootstrap_full."""
+def test_conf_intervals_default_is_bootstrap(get_univariate_data):
+    """Default (no method arg) is bootstrap using test residuals."""
     signal = _setup_signal_with_model(get_univariate_data)
     signal.compute_conf_intervals(n_bootstrap=10, random_state=42)
 
     result = signal.models['ExponentialSmoothing']
     _assert_ci_valid(result.test_confidence_interval, result.predictions)
-    assert result.historical_residuals is not None
+    assert result.test_residuals is not None
 
 
 def test_conf_intervals_bootstrap(get_univariate_data):
     """Bootstrap residual method produces valid intervals."""
     signal = _setup_signal_with_model(get_univariate_data)
+    signal.refit('ExponentialSmoothing')
     signal.forecast('ExponentialSmoothing', 12)
     signal.compute_conf_intervals(
         method="bootstrap", n_bootstrap=500, alpha=0.05, random_state=42
@@ -534,8 +383,8 @@ def test_conf_intervals_bootstrap(get_univariate_data):
     result = signal.models['ExponentialSmoothing']
     _assert_ci_valid(result.test_confidence_interval, result.predictions)
     _assert_ci_valid(result.forecast_confidence_interval, result.forecast_data)
-    assert result.historical_residuals is not None
-    assert len(result.historical_residuals) > 0
+    assert result.test_residuals is not None
+    assert len(result.test_residuals) > 0
 
 
 def test_conf_intervals_bootstrap_full(get_univariate_data):
@@ -568,6 +417,7 @@ def test_conf_intervals_bootstrap_reproducible(get_univariate_data):
 def test_conf_intervals_bootstrap_other_dataset(get_univariate_data):
     """Bootstrap CI with forecast on univariate data."""
     signal = _setup_signal_with_model(get_univariate_data)
+    signal.refit('ExponentialSmoothing')
     signal.forecast('ExponentialSmoothing', 6)
     signal.ci.compute(method="bootstrap", n_bootstrap=200, random_state=42)
 
@@ -590,16 +440,16 @@ def test_ci_accessor_compute(get_univariate_data):
 
     result = signal.models['ExponentialSmoothing']
     _assert_ci_valid(result.test_confidence_interval, result.predictions)
-    assert result.historical_residuals is not None
+    assert result.test_residuals is not None
 
 
-def test_ci_accessor_default_is_bootstrap_full(get_univariate_data):
-    """signal.ci.compute() defaults to bootstrap_full."""
+def test_ci_accessor_default_is_bootstrap(get_univariate_data):
+    """signal.ci.compute() defaults to bootstrap using test residuals."""
     signal = _setup_signal_with_model(get_univariate_data)
     signal.ci.compute(n_bootstrap=10, random_state=42)
 
     result = signal.models['ExponentialSmoothing']
     _assert_ci_valid(result.test_confidence_interval, result.predictions)
-    assert result.historical_residuals is not None
+    assert result.test_residuals is not None
 
 

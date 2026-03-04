@@ -16,8 +16,8 @@ from typing import Union
 import pandas as pd
 
 from pasts.core.base_model import TimeSeriesModel
-from pasts.core.datacube import DataCube
-from pasts.core.decomposition import Decomposition
+from pasts.core.datacube import DataCube, _make_future_index
+from pasts.core.decomposition import DecompositionModel
 from pasts.core.model_result import ModelResult
 from pasts.covariates import Covariates, validate_covariates
 from pasts.components.darts_model import DartsModel
@@ -32,7 +32,7 @@ from pasts.prediction_intervals import CIAccessor
 class Signal(DataCube):
     """A class to represent a signal.
 
-    Combines data storage, decomposition, model fitting, scoring, and
+    Combines data storage, model fitting, scoring, and
     forecasting in a single orchestrator.
 
     Attributes
@@ -41,6 +41,12 @@ class Signal(DataCube):
         keys: model names, values: :class:`ModelResult` instances.
     """
 
+    _metadata = [
+        '_ops', 'path', '_properties', '_tests_stat',
+        '_validation', 'models', '_decompositions',
+        '_performance_models', '_covariates',
+    ]
+
     # -------------------------------------------------------------------
     # Init
     # -------------------------------------------------------------------
@@ -48,11 +54,12 @@ class Signal(DataCube):
     @staticmethod
     def _profiling(data: pd.DataFrame) -> dict:
         """Compute basic properties of the time series."""
-        return {'shape': data.shape,
-                'types': data.dtypes,
-                'is_univariate': data.shape[1] == 1,
-                'nanSum': data.isnull().sum(),
-                'quantiles': data.quantile([0, 0.05, 0.50, 0.95, 0.99, 1]).T}
+        df = pd.DataFrame(data)
+        return {'shape': df.shape,
+                'types': df.dtypes,
+                'is_univariate': df.shape[1] == 1,
+                'nanSum': df.isnull().sum(),
+                'quantiles': df.quantile([0, 0.05, 0.50, 0.95, 0.99, 1]).T}
 
     def __init__(self, data: pd.DataFrame, path: str = None):
         """
@@ -66,47 +73,19 @@ class Signal(DataCube):
         path : str, optional
                 The path to the directory where the Signal data will be stored. The directory may or
                 may not exist. If it doesn't exist, it will be created automatically.
-                If None, no directory is created (e.g. when used as a residual).
+                If None, no directory is created.
         """
         if path and not os.path.exists(path):
             os.makedirs(path)
-        self.path = path
         super().__init__(data)
+        self.path = path
         self._properties = Signal._profiling(data)
         self._tests_stat = {}
         self._validation = ValidationAccessor(self)
         self.models = {}
-        self._performance_models = {}
         self._decompositions = {}
+        self._performance_models = {}
         self._covariates = Covariates()
-
-    # -------------------------------------------------------------------
-    # In-place operators: auto-fit TimeSeriesModel on residual
-    # -------------------------------------------------------------------
-
-    def _autofit(self, other):
-        """Auto-fit a TimeSeriesModel on the current data (residual).
-
-        If *other* is a :class:`TimeSeriesModel`, it is deep-copied and
-        fitted on ``self.data``.  This ensures the model is always fitted
-        on the correct residual data, not on the original signal.
-        """
-        if isinstance(other, TimeSeriesModel):
-            other = copy.deepcopy(other)
-            other.fit(self.data, covariates=self._covariates)
-        return other
-
-    def __isub__(self, other):
-        return super().__isub__(self._autofit(other))
-
-    def __iadd__(self, other):
-        return super().__iadd__(self._autofit(other))
-
-    def __imul__(self, other):
-        return super().__imul__(self._autofit(other))
-
-    def __itruediv__(self, other):
-        return super().__itruediv__(self._autofit(other))
 
     # -------------------------------------------------------------------
     # Properties
@@ -189,16 +168,17 @@ class Signal(DataCube):
             ``"fill"``, ``method='linear'`` for ``"interpolate"``).
         """
         if method == "drop":
-            self._data = self._data.dropna(**kwargs)
+            result = self.dropna(**kwargs)
         elif method == "fill":
-            self._data = self._data.fillna(kwargs.pop("value", 0), **kwargs)
+            result = self.fillna(kwargs.pop("value", 0), **kwargs)
         elif method == "interpolate":
-            self._data = self._data.interpolate(**kwargs).bfill().ffill()
+            result = self.interpolate(**kwargs).bfill().ffill()
         else:
             raise ValueError(
                 f"Unknown method {method!r}. Use 'drop', 'fill', or 'interpolate'."
             )
-        self._properties = Signal._profiling(self._data)
+        pd.DataFrame.__init__(self, data=result)
+        self._properties = Signal._profiling(self)
         if self._validation._timestamp is not None:
             self._validation.reset()
             warnings.warn(
@@ -206,6 +186,37 @@ class Signal(DataCube):
                 "Call validation_split() again.",
                 UserWarning,
             )
+
+    # -------------------------------------------------------------------
+    # Decomposition
+    # -------------------------------------------------------------------
+
+    def decompose(self, name: str = "default") -> None:
+        """Create a named decomposition slot.
+
+        The returned :class:`Decomposition` supports in-place operators
+        (``-=``, ``+=``, …) and :meth:`~Decomposition.apply_model`.
+
+        Parameters
+        ----------
+        name : str
+            Decomposition name (default ``"default"``).
+        """
+        self._decompositions[name] = DecompositionModel()
+
+    @property
+    def decompositions(self) -> dict:
+        """Named decompositions created by :meth:`decompose`."""
+        return self._decompositions
+
+    @property
+    def residual(self):
+        """Shortcut for ``decompositions["default"]``."""
+        return self._decompositions.get("default")
+
+    @residual.setter
+    def residual(self, value):
+        self._decompositions["default"] = value
 
     # -------------------------------------------------------------------
     # Accessors: plot, stat, validation, ci
@@ -286,80 +297,6 @@ class Signal(DataCube):
         self._validation.split(timestamp, n_splits_cv)
 
     # -------------------------------------------------------------------
-    # Decomposition
-    # -------------------------------------------------------------------
-
-    def decompose(self, name: str = "default") -> None:
-        """Initialize a named residual as a copy of the signal data.
-
-        After calling this method, operate on ``signal.decompositions[name]`` to
-        build the decomposition (e.g. ``signal.decompositions["t"] -= Trend()``).
-        Each named residual is a full :class:`Signal`, so all analysis methods
-        (``apply_model``, ``validation_split``, etc.) work on it directly.
-        Multiple named decompositions can coexist on the same signal.
-
-        The new decomposition shares the parent's :class:`~pasts.validation.ValidationAccessor`,
-        so the train/test boundary is always in sync without any explicit propagation.
-
-        Parameters
-        ----------
-        name : str, optional
-            Name for this decomposition (default ``"default"``).
-            Calling ``decompose()`` without a name keeps backward compatibility
-            with ``signal.residual``.
-        """
-        decomp_path = os.path.join(self.path, name) if self.path else None
-        decomp = Signal(self.data.copy(), path=decomp_path)
-        decomp._validation = self._validation   # share — no propagation needed
-        decomp._covariates = self._covariates   # share covariates
-        self._decompositions[name] = decomp
-
-    @property
-    def decompositions(self) -> dict:
-        """Dict of named residuals (each a :class:`Signal`).
-
-        Access a named decomposition via ``signal.decompositions["name"]``.
-        """
-        return self._decompositions
-
-    @property
-    def residual(self) -> "Signal":
-        """Shorthand for the default decomposition (``decompositions["default"]``).
-
-        Backward-compatible with ``signal.decompose()`` (no name).
-        """
-        return self._decompositions.get("default")
-
-    @residual.setter
-    def residual(self, value):
-        self._decompositions["default"] = value
-
-    @property
-    def decomposition(self) -> "Decomposition":
-        """Decomposition formula for the default residual.
-
-        Backward-compatible property. For named decompositions use
-        ``signal.get_decomposition(name)``.
-        """
-        if "default" not in self._decompositions:
-            raise AttributeError("No decomposition. Call decompose() first.")
-        return Decomposition(self._decompositions["default"]._ops)
-
-    def get_decomposition(self, name: str = "default") -> "Decomposition":
-        """Return the :class:`Decomposition` formula for a named residual.
-
-        Parameters
-        ----------
-        name : str
-            Name of the decomposition (as passed to ``decompose(name)``).
-        """
-        if name not in self._decompositions:
-            raise AttributeError(
-                f"No decomposition named {name!r}. Call decompose({name!r}) first."
-            )
-        return Decomposition(self._decompositions[name]._ops)
-
-    # -------------------------------------------------------------------
     # Modeling: fit, predict, aggregate
     # -------------------------------------------------------------------
 
@@ -381,13 +318,13 @@ class Signal(DataCube):
         """Fit a TimeSeriesModel on train data and predict on test set."""
         self._check_nan_for_model(self.train_data, model, "fit")
         model.fit(self.train_data, covariates=self._covariates)
-        predictions = model.reverse_transform(len(self.test_data))
+        predictions = model.forecast(len(self.test_data))
         # Align prediction index with test_data to avoid index mismatch
         # (e.g. Darts may produce slightly different DatetimeIndex values)
         if len(predictions) == len(self.test_data):
             predictions.index = self.test_data.index
         return ModelResult(
-            model=model,
+            estimator_on_train=model,
             predictions=predictions,
             best_parameters=getattr(model, 'best_params_', None) or "default",
             _data=self.data,
@@ -398,7 +335,8 @@ class Signal(DataCube):
                     model: object,
                     gridsearch: bool = False,
                     parameters: dict = None,
-                    save_model: bool = False) -> None:
+                    save_model: bool = False,
+                    decomposition: str = None) -> None:
         """
         Applies a model to the series.
 
@@ -417,6 +355,10 @@ class Signal(DataCube):
                 Parameters to test if a gridsearch is performed (default is None)
         save_model : bool, optional
                 Whether to save the model in a file in Signal.path (default is False).
+        decomposition : str, optional
+                Name of a decomposition created by :meth:`decompose`. When set,
+                the model is trained on the residual and predictions are
+                recomposed back to the original signal space.
 
         Returns
         -------
@@ -429,9 +371,24 @@ class Signal(DataCube):
             model = DartsModel(model, gridsearch_params=gridsearch_params)
 
         model = copy.deepcopy(model)
-        self.models[model.name] = self._fit_and_predict(model)
+
+        if decomposition is not None:
+            decomp = self._decompositions[decomposition]
+            decomp_copy = DecompositionModel()
+            decomp_copy._ops = copy.deepcopy(decomp._ops)
+            model._decomposition = decomp_copy
+            name = f"{decomposition}__{model.name}"
+        else:
+            name = model.name
+
+        self.models[name] = self._fit_and_predict(model)
         if save_model:
-            persistence.save_model(self.path, model.name, self.models[model.name])
+            if self.path is None:
+                raise ValueError(
+                    "Cannot save model: no path was provided when creating the Signal. "
+                    "Pass a `path` argument to Signal() or set `save_model=False`."
+                )
+            persistence.save_model(self.path, name, self.models[name])
             persistence.save_common_data(self.path, self.train_data, self.test_data)
 
     # -------------------------------------------------------------------
@@ -469,58 +426,43 @@ class Signal(DataCube):
         self.performance_models[score_type] = call_metric.scores_comparison(axis)
 
     # -------------------------------------------------------------------
-    # Forecasting
+    # Refit & Forecasting
     # -------------------------------------------------------------------
 
-    def _setup_decomposition_model(self, name: str) -> None:
-        """Lazily create a Decomposition-based ModelResult for ``"decomp__model"`` names."""
-        if name in self.models:
-            return
-        decomp_name, model_name = name.split('__', 1)
-        if decomp_name not in self._decompositions:
-            raise ValueError(
-                f"No decomposition named {decomp_name!r}. "
-                f"Call decompose({decomp_name!r}) first."
-            )
-        decomp_signal = self._decompositions[decomp_name]
-        if model_name not in decomp_signal.models:
-            raise ValueError(
-                f"Model {model_name!r} has not been trained on "
-                f"decomposition {decomp_name!r}."
-            )
-        result = decomp_signal.models[model_name]
-        decomp_model = Decomposition(
-            decomp_signal._ops, model=copy.deepcopy(result.model)
-        )
+    def refit(self, name: str = None) -> None:
+        """Refit model(s) on the full dataset (train + test).
 
-        # Compose test predictions back to the original signal space
-        composed_pred = None
-        decomp = self.get_decomposition(decomp_name)
-        if result.predictions is not None:
-            composed_pred = decomp.compose(DataCube(result.predictions)).data
-            if len(composed_pred) == len(self.test_data):
-                composed_pred.index = self.test_data.index
+        Must be called before :meth:`forecast`.  Each model is deep-copied
+        so that the original (train-only) estimator in
+        ``models[name].estimator_on_train`` is preserved.
 
-        self.models[name] = ModelResult(
-            model=decomp_model,
-            predictions=composed_pred,
-            best_parameters=result.best_parameters,
-            _data=self.data,
-            _covariates=self._covariates,
-        )
+        Parameters
+        ----------
+        name : str, optional
+            Model key to refit.  If ``None``, all models are refitted.
+        """
+        names = [name] if name else list(self.models.keys())
+        for n in names:
+            if n not in self.models:
+                raise ValueError(f"Model '{n}' has not been trained.")
+            result = self.models[n]
+            result.estimator_on_all = copy.deepcopy(result.estimator_on_train)
+            result.estimator_on_all.fit(self.data, covariates=self._covariates)
 
     def forecast(self, name: str, horizon: int, save_model: bool = False) -> pd.DataFrame:
-        """Forecast future values for a fitted model.
+        """Forecast *horizon* steps ahead.
 
-        For decomposition paths (``"decomp__model"``), a
-        :class:`~pasts.core.decomposition.Decomposition` model is
-        created lazily from the residual's operations and model.
+        Before :meth:`refit`: uses the train-only model — the forecast
+        starts at the end of *train_data* (covers the test period and
+        potentially beyond).
+
+        After :meth:`refit`: uses the full-data model — the forecast
+        starts at the end of the full dataset (true future).
 
         Parameters
         ----------
         name : str
-            Model key, or ``"decomp_name__model_name"`` for the
-            decomposition path.
+            Model key (as stored in ``signal.models``).
         horizon : int
             Number of steps to forecast.
         save_model : bool, optional
@@ -533,13 +475,23 @@ class Signal(DataCube):
         if not self._covariates.is_empty:
             validate_covariates(self.data.index, self._covariates,
                                 forecast_horizon=horizon)
-        if '__' in name:
-            self._setup_decomposition_model(name)
         if name not in self.models:
             raise ValueError(f'{name} has not been trained.')
         result = self.models[name]
-        result.forecast(horizon)
+        estimator = result.estimator_on_all if result.estimator_on_all is not None else result.estimator_on_train
+        result.forecast_data = estimator.forecast(horizon)
+        # Correct forecast index — Darts may infer wrong timestamps.
+        # Mirrors the alignment done for test predictions in _fit_and_predict.
+        anchor_idx = self.data.index if result.estimator_on_all is not None else self.train_data.index
+        correct_idx = _make_future_index(anchor_idx, horizon)
+        if len(result.forecast_data) == horizon:
+            result.forecast_data.index = correct_idx
         if save_model:
+            if self.path is None:
+                raise ValueError(
+                    "Cannot save model: no path was provided when creating the Signal. "
+                    "Pass a `path` argument to Signal() or set `save_model=False`."
+                )
             persistence.save_model(self.path, name, result, suffix="final")
             persistence.save_common_data(self.path, self.train_data, self.test_data)
         return result.forecast_data

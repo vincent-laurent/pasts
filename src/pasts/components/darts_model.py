@@ -8,7 +8,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
+import copy
 import warnings
+
+import pandas as pd
 
 from pasts.core.base_model import TimeSeriesModel
 
@@ -79,6 +82,11 @@ class DartsModel(TimeSeriesModel):
         Parameter grid for gridsearch. When provided, :meth:`fit` runs
         ``model.gridsearch(...)`` before the normal fit. The best
         parameters are stored in :attr:`best_params_`.
+    decomposition : :class:`~pasts.core.decomposition.Decomposition`, optional
+        When provided, :meth:`fit` replays the decomposition on the
+        training data first and fits the Darts model on the residual.
+        :meth:`forecast` then recomposes predictions back to the
+        original signal space.
 
     Notes
     -----
@@ -87,10 +95,11 @@ class DartsModel(TimeSeriesModel):
     retrieve the |i| last in-sample one-step-ahead predictions.
     """
 
-    def __init__(self, model, gridsearch_params=None):
+    def __init__(self, model, gridsearch_params=None, decomposition=None):
         self._model = model
         self._gridsearch_params = gridsearch_params
         self.best_params_ = None
+        self._decomposition = decomposition
 
     @property
     def name(self) -> str:
@@ -115,6 +124,11 @@ class DartsModel(TimeSeriesModel):
         from pasts.core.datacube import DataCube
         if isinstance(X, DataCube):
             X = X.data
+
+        if self._decomposition is not None:
+            self._decomposition.fit(X, covariates=covariates)
+            X = self._decomposition.residual
+
         if X.isna().any().any():
             n_nan = int(X.isna().sum().sum())
             cols = list(X.columns[X.isna().any()])
@@ -143,19 +157,58 @@ class DartsModel(TimeSeriesModel):
         # Build temporal covariate kwargs and store for predict/historical_forecasts
         self._cov_kwargs = _filter_covariates_for_model(self._model, covariates)
 
-        if self._gridsearch_params:
-            print('Performing the gridsearch for', self.name, '...')
-            best_model, self.best_params_, _ = self._model.gridsearch(
-                parameters=self._gridsearch_params,
-                series=self._train_series,
-                start=0.5,
-                forecast_horizon=5,
-                **self._cov_kwargs,
-            )
-            self._model = best_model
-        self._model.fit(self._train_series, **self._cov_kwargs)
+        self._per_column = False
+        try:
+            if self._gridsearch_params:
+                print('Performing the gridsearch for', self.name, '...')
+                best_model, self.best_params_, _ = self._model.gridsearch(
+                    parameters=self._gridsearch_params,
+                    series=self._train_series,
+                    start=0.5,
+                    forecast_horizon=5,
+                    **self._cov_kwargs,
+                )
+                self._model = best_model
+            self._model.fit(self._train_series, **self._cov_kwargs)
+        except ValueError as e:
+            if "univariate" in str(e).lower() and X.shape[1] > 1:
+                warnings.warn(
+                    f"{self.name} only supports univariate series; "
+                    f"fitting one model per column ({X.shape[1]} columns).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                self._fit_per_column(X)
+            else:
+                raise
         self._n_train = len(self._train_series)
         return self
+
+    def _fit_per_column(self, X):
+        """Fit a separate model clone per column for univariate-only models."""
+        from darts import TimeSeries
+
+        self._per_column = True
+        self._column_models = {}
+        self._column_train_series = {}
+
+        for col in X.columns:
+            col_model = copy.deepcopy(self._model)
+            col_series = TimeSeries.from_dataframe(X[[col]])
+
+            if self._gridsearch_params:
+                best_model, _, _ = col_model.gridsearch(
+                    parameters=self._gridsearch_params,
+                    series=col_series,
+                    start=0.5,
+                    forecast_horizon=5,
+                    **self._cov_kwargs,
+                )
+                col_model = best_model
+
+            col_model.fit(col_series, **self._cov_kwargs)
+            self._column_models[col] = col_model
+            self._column_train_series[col] = col_series
 
     def compute_historical_residuals(self, train_data):
         """Compute one-step-ahead historical forecast residuals on training data.
@@ -166,16 +219,25 @@ class DartsModel(TimeSeriesModel):
 
         Covariates stored during :meth:`fit` are forwarded automatically.
 
+        Residuals are always returned in the original signal space.
+        When a decomposition is attached, the Darts historical forecasts
+        (in residual space) are recomposed back to original space before
+        computing residuals against *train_data*.
+
         Parameters
         ----------
         train_data : pd.DataFrame
-            Training data (same as passed to :meth:`fit`).
+            Training data in original signal space.
 
         Returns
         -------
         pd.DataFrame
-            Residuals aligned to the covered portion of *train_data*.
+            Residuals in original signal space, aligned to the covered
+            portion of *train_data*.
         """
+        if getattr(self, '_per_column', False):
+            return self._compute_historical_residuals_per_column(train_data)
+
         from darts.models.forecasting.forecasting_model import (
             LocalForecastingModel,
         )
@@ -189,6 +251,41 @@ class DartsModel(TimeSeriesModel):
             **cov_kwargs,
         )
         hf_df = hf.to_dataframe()
+
+        if self._decomposition is not None:
+            hf_df = self._decomposition.recompose(hf_df, -len(hf_df))
+
+        common_index = train_data.index.intersection(hf_df.index)
+        if len(common_index) == 0:
+            n_hf = len(hf_df)
+            hf_df.index = train_data.index[-n_hf:]
+            common_index = hf_df.index
+
+        return train_data.loc[common_index] - hf_df.loc[common_index]
+
+    def _compute_historical_residuals_per_column(self, train_data):
+        """Per-column historical residuals for univariate-only models."""
+        from darts.models.forecasting.forecasting_model import (
+            LocalForecastingModel,
+        )
+        cov_kwargs = getattr(self, "_cov_kwargs", {})
+        results = []
+        for col in self._column_models:
+            model = self._column_models[col]
+            series = self._column_train_series[col]
+            retrain = isinstance(model, LocalForecastingModel)
+            hf = model.historical_forecasts(
+                series,
+                start=0.5,
+                forecast_horizon=1,
+                retrain=retrain,
+                **cov_kwargs,
+            )
+            results.append(hf.to_dataframe())
+        hf_df = pd.concat(results, axis=1)
+
+        if self._decomposition is not None:
+            hf_df = self._decomposition.recompose(hf_df, -len(hf_df))
 
         common_index = train_data.index.intersection(hf_df.index)
         if len(common_index) == 0:
@@ -209,6 +306,8 @@ class DartsModel(TimeSeriesModel):
             i > 0 : forecast the next *i* steps.
             i < 0 : return the last *|i|* one-step-ahead in-sample predictions.
         """
+        if getattr(self, '_per_column', False):
+            return self._reverse_transform_per_column(i)
         cov_kwargs = getattr(self, "_cov_kwargs", {})
         if i > 0:
             return self._model.predict(i, **cov_kwargs).to_dataframe()
@@ -220,3 +319,24 @@ class DartsModel(TimeSeriesModel):
             **cov_kwargs,
         )
         return hf.to_dataframe()
+
+    def _reverse_transform_per_column(self, i: int):
+        """Per-column reverse_transform for univariate-only models."""
+        cov_kwargs = getattr(self, "_cov_kwargs", {})
+        results = []
+        for col in self._column_models:
+            model = self._column_models[col]
+            if i > 0:
+                col_df = model.predict(i, **cov_kwargs).to_dataframe()
+            else:
+                series = self._column_train_series[col]
+                hf = model.historical_forecasts(
+                    series,
+                    start=self._n_train + i,
+                    forecast_horizon=1,
+                    retrain=False,
+                    **cov_kwargs,
+                )
+                col_df = hf.to_dataframe()
+            results.append(col_df)
+        return pd.concat(results, axis=1)

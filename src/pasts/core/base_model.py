@@ -39,6 +39,7 @@ class TimeSeriesModel(ABC):
     """
 
     nan_safe: bool = False
+    _decomposition = None
 
     @property
     def name(self) -> str:
@@ -70,7 +71,11 @@ class TimeSeriesModel(ABC):
     def compute_historical_residuals(self, train_data: pd.DataFrame) -> pd.DataFrame:
         """Compute one-step-ahead historical residuals on the training set.
 
-        Default implementation: ``train_data - reverse_transform(-n)``.
+        Residuals are always returned in the same space as *train_data*
+        (original signal space).  When a decomposition is attached, fitted
+        values are recomposed before computing residuals.
+
+        Default implementation: ``train_data - forecast(-n)``.
         This is exact for deterministic models (trends).  Stochastic models
         (e.g. :class:`DartsModel`) should override this to use proper
         one-step-ahead historical forecasts.
@@ -87,7 +92,7 @@ class TimeSeriesModel(ABC):
             produce fitted values for all training points).
         """
         n = len(train_data)
-        fitted = self.reverse_transform(-n)
+        fitted = self.forecast(-n)
         if len(fitted) < n:
             train_data = train_data.iloc[-len(fitted):]
         if len(fitted) == len(train_data):
@@ -97,7 +102,8 @@ class TimeSeriesModel(ABC):
     def forecast(self, horizon: int) -> pd.DataFrame:
         """Forecast the next *horizon* steps after the training data.
 
-        Convenience method equivalent to ``reverse_transform(horizon)``.
+        When a decomposition is attached, the raw prediction (in residual
+        space) is recomposed back to the original signal space.
 
         Parameters
         ----------
@@ -108,7 +114,10 @@ class TimeSeriesModel(ABC):
         -------
         pd.DataFrame
         """
-        return self.reverse_transform(horizon)
+        raw = self.reverse_transform(horizon)
+        if self._decomposition is not None:
+            return self._decomposition.recompose(raw, horizon)
+        return raw
 
     def transform(self, i: int) -> pd.DataFrame:
         """Return values to remove the component (negation of ``reverse_transform``).

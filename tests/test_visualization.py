@@ -1,11 +1,11 @@
 import matplotlib.figure
 import pytest
 from matplotlib import pyplot as plt
-from darts.models import ExponentialSmoothing, AutoARIMA
+from darts.models import ExponentialSmoothing, AutoARIMA, XGBModel
 
 from pasts.signal import Signal
-from pasts.components import LinearTrend
 from pasts.components.aggregated_model import AggregatedModel
+from pasts.components.trend import LinearTrend
 
 
 def test_errors_visualization(get_univariate_data, get_multivariate_data):
@@ -17,18 +17,10 @@ def test_errors_visualization(get_univariate_data, get_multivariate_data):
         signal.plot.predictions()
 
 
-def test_plot_signal(get_univariate_data, get_multivariate_data):
-    signal = Signal(get_univariate_data, 'tests')
+def test_plot_signal(get_multivariate_data):
     signal_m = Signal(get_multivariate_data, 'tests')
 
     fig = signal_m.plot()
-    assert isinstance(fig, matplotlib.figure.Figure)
-    plt.close(fig)
-
-    # With decomposition
-    signal.decompose()
-    signal.residual -= LinearTrend()
-    fig = signal.plot()
     assert isinstance(fig, matplotlib.figure.Figure)
     plt.close(fig)
 
@@ -51,6 +43,30 @@ def test_show_predictions(get_univariate_data):
     plt.close(fig)
 
 
+def test_show_predictions_with_fitted(get_univariate_data):
+    signal = Signal(get_univariate_data, 'tests')
+    tstamp = '1958-12-01'
+    signal.validation_split(tstamp)
+    signal.apply_model(ExponentialSmoothing())
+
+    fig = signal.plot.predictions(show_fitted=True)
+    assert isinstance(fig, matplotlib.figure.Figure)
+    plt.close(fig)
+
+
+def test_show_predictions_with_fitted_decomposition(get_univariate_data):
+    signal = Signal(get_univariate_data, 'tests')
+    tstamp = '1958-12-01'
+    signal.validation_split(tstamp)
+    signal.decompose("trend")
+    signal.decompositions["trend"] -= LinearTrend()
+    signal.apply_model(XGBModel(lags=12), decomposition="trend")
+
+    fig = signal.plot.predictions(show_fitted=True)
+    assert isinstance(fig, matplotlib.figure.Figure)
+    plt.close(fig)
+
+
 def test_show_forecast(get_univariate_data):
     signal = Signal(get_univariate_data, 'tests')
     tstamp = '1958-12-01'
@@ -58,6 +74,7 @@ def test_show_forecast(get_univariate_data):
     signal.apply_model(AggregatedModel(
         {'AutoARIMA': AutoARIMA(), 'ExponentialSmoothing': ExponentialSmoothing()},
     ))
+    signal.refit('AggregatedModel')
     signal.forecast('AggregatedModel', 12)
 
     fig = signal.plot.forecast()

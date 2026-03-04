@@ -6,11 +6,11 @@ from pasts.components.trend import (
     Differencing,
     HPFilterTrend,
     HighPassFilterTrend,
+    LinearTrend,
     MovingAverageTrend,
     STLTrend,
 )
 from pasts.signal import Signal
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -61,6 +61,45 @@ def numeric_index_ts():
 
 
 # ---------------------------------------------------------------------------
+# LinearTrend
+# ---------------------------------------------------------------------------
+
+class TestLinearTrend:
+    def test_fit_reverse_univariate(self, univariate_ts):
+        m = LinearTrend().fit(univariate_ts)
+        trend = m.reverse_transform(-len(univariate_ts))
+        assert trend.shape == univariate_ts.shape
+        assert list(trend.columns) == list(univariate_ts.columns)
+
+    def test_fit_reverse_multivariate(self, multivariate_ts):
+        m = LinearTrend().fit(multivariate_ts)
+        trend = m.reverse_transform(-len(multivariate_ts))
+        assert trend.shape == multivariate_ts.shape
+
+    def test_future(self, univariate_ts):
+        m = LinearTrend().fit(univariate_ts)
+        future = m.reverse_transform(10)
+        assert len(future) == 10
+        assert future.index[0] > univariate_ts.index[-1]
+
+    def test_lags(self, univariate_ts):
+        m_full = LinearTrend().fit(univariate_ts)
+        m_lags = LinearTrend(lags=60).fit(univariate_ts)
+        # Both produce correct shape
+        trend_full = m_full.reverse_transform(-len(univariate_ts))
+        trend_lags = m_lags.reverse_transform(-len(univariate_ts))
+        assert trend_full.shape == trend_lags.shape
+        # Coefficients differ (different fitting window)
+        assert not np.allclose(m_full.coef_, m_lags.coef_)
+
+    def test_lags_future(self, univariate_ts):
+        m = LinearTrend(lags=60).fit(univariate_ts)
+        future = m.reverse_transform(12)
+        assert len(future) == 12
+        assert future.index[0] > univariate_ts.index[-1]
+
+
+# ---------------------------------------------------------------------------
 # MovingAverageTrend
 # ---------------------------------------------------------------------------
 
@@ -108,8 +147,10 @@ class TestMovingAverageTrend:
         signal = Signal(univariate_ts)
         signal.decompose()
         signal.residual -= MovingAverageTrend(window=12)
-        residual = signal.residual.data
-        # Residual should have reduced variance (trend removed)
+        assert len(signal.residual._ops) == 1
+        # Verify fit + residual works
+        signal.residual.fit(univariate_ts)
+        residual = signal.residual.residual
         assert residual.std().iloc[0] < univariate_ts.std().iloc[0]
 
 
@@ -172,7 +213,9 @@ class TestSTLTrend:
         signal = Signal(univariate_ts)
         signal.decompose()
         signal.residual -= STLTrend(period=12)
-        residual = signal.residual.data
+        assert len(signal.residual._ops) == 1
+        signal.residual.fit(univariate_ts)
+        residual = signal.residual.residual
         assert residual.std().iloc[0] < univariate_ts.std().iloc[0]
 
 
@@ -230,14 +273,6 @@ class TestDifferencing:
         expected = multivariate_ts.diff().iloc[1:]
         pd.testing.assert_frame_equal(forward, expected, atol=1e-10)
 
-    def test_with_datacube_apply(self, univariate_ts):
-        signal = Signal(univariate_ts)
-        signal.decompose()
-        diff = Differencing(order=1).fit(signal.data)
-        signal.residual.apply(diff.forward, diff.inverse)
-        # Residual should be the differenced series
-        assert len(signal.residual.data) == len(univariate_ts) - 1
-
     def test_future_inverse(self, univariate_ts):
         """Verify that inverse correctly reconstructs from future diffs."""
         diff = Differencing(order=1).fit(univariate_ts)
@@ -254,11 +289,68 @@ class TestDifferencing:
         expected = last_val + np.cumsum([1.0, 1.0, 1.0, 1.0, 1.0])
         np.testing.assert_allclose(result["value"].values, expected, atol=1e-10)
 
+    def test_with_datacube_apply(self, univariate_ts):
+        signal = Signal(univariate_ts)
+        signal.decompose()
+        diff = Differencing(order=1).fit(signal.data)
+        signal.residual.apply(diff.forward, diff.inverse)
+        assert len(signal.residual._ops) == 1
+        assert signal.residual._ops[0][0] == 'unary'
+
     def test_nan_propagation(self, ts_with_nan):
         diff = Differencing(order=1).fit(ts_with_nan)
         forward = diff.forward(ts_with_nan)
         # NaN should propagate: positions adjacent to NaN in original become NaN
         assert forward.isna().any().any()
+
+
+# ---------------------------------------------------------------------------
+# EMDTrend (skip if PyEMD not installed)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# forecast_model parameter
+# ---------------------------------------------------------------------------
+
+class TestForecastModel:
+    def test_moving_average_with_forecast_model(self, univariate_ts):
+        from darts.models import ExponentialSmoothing
+        m = MovingAverageTrend(window=12, forecast_model=ExponentialSmoothing())
+        m.fit(univariate_ts)
+        future = m.reverse_transform(10)
+        assert len(future) == 10
+        assert future.index[0] > univariate_ts.index[-1]
+        # Should not be constant (unlike 'constant' strategy)
+        assert not np.allclose(future.values, future.iloc[0].values)
+
+    def test_hp_filter_with_forecast_model(self, univariate_ts):
+        from darts.models import ExponentialSmoothing
+        m = HPFilterTrend(lamb=1600, forecast_model=ExponentialSmoothing())
+        m.fit(univariate_ts)
+        future = m.reverse_transform(12)
+        assert len(future) == 12
+        assert future.index[0] > univariate_ts.index[-1]
+
+    def test_stl_with_forecast_model(self, univariate_ts):
+        from darts.models import ExponentialSmoothing
+        m = STLTrend(period=12, forecast_model=ExponentialSmoothing())
+        m.fit(univariate_ts)
+        future = m.reverse_transform(10)
+        assert len(future) == 10
+
+    def test_forecast_model_multivariate(self, multivariate_ts):
+        from darts.models import NaiveDrift
+        m = MovingAverageTrend(window=12, forecast_model=NaiveDrift())
+        m.fit(multivariate_ts)
+        future = m.reverse_transform(10)
+        assert future.shape == (10, 3)
+
+    def test_backward_compat_no_forecast_model(self, univariate_ts):
+        """Without forecast_model, behaviour is unchanged."""
+        m = MovingAverageTrend(window=12, extrapolation='constant')
+        m.fit(univariate_ts)
+        future = m.reverse_transform(10)
+        assert np.allclose(future.values, future.iloc[0].values)
 
 
 # ---------------------------------------------------------------------------

@@ -3,8 +3,9 @@ import pandas as pd
 import pytest
 
 from pasts.core.datacube import DataCube, _to_dataframe
-from pasts.core.decomposition import Decomposition
+from pasts.core.decomposition import Decomposition, DecompositionModel
 from pasts.components import LinearTrend
+from pasts.signal import Signal
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,29 @@ class TestDataCubeUnary:
 
 
 # ---------------------------------------------------------------------------
+# Decomposition — auto-fit in operators
+# ---------------------------------------------------------------------------
+
+class TestDecompositionAutoFit:
+
+    def test_isub_auto_fits_trend(self, simple_df):
+        """Decomposition -= LinearTrend() auto-fits the trend."""
+        decomp = Decomposition(simple_df.copy())
+        decomp -= LinearTrend()
+        # Ops should be recorded
+        assert len(decomp._ops) == 1
+        # The trend in _ops should be fitted (has coef_)
+        component = decomp._ops[0][2]
+        assert hasattr(component, 'coef_')
+
+    def test_isub_records_ops(self, simple_df):
+        decomp = Decomposition(simple_df.copy())
+        decomp -= 10
+        assert len(decomp._ops) == 1
+        assert decomp._ops[0][0] == 'binary'
+
+
+# ---------------------------------------------------------------------------
 # Decomposition — compose roundtrip
 # ---------------------------------------------------------------------------
 
@@ -106,47 +130,41 @@ class TestDecompositionCompose:
     def test_roundtrip_sub(self, simple_df):
         """signal -= C  →  compose should add C back."""
         original = simple_df.copy()
-        r = DataCube(simple_df.copy())
+        decomp = Decomposition(simple_df.copy())
         comp = DataCube(pd.DataFrame(10.0, index=simple_df.index, columns=simple_df.columns))
-        r -= comp
-        decomp = Decomposition(r._ops)
-        reconstructed = decomp.compose(r)
+        decomp -= comp
+        reconstructed = decomp.compose(decomp)
         np.testing.assert_allclose(reconstructed.data.values, original.values)
 
     def test_roundtrip_sub_div(self, simple_df, alpha_dc):
         """signal -= T; signal /= alpha  →  roundtrip."""
         original = simple_df.copy()
-        r = DataCube(simple_df.copy())
-        trend = LinearTrend().fit(simple_df)
-        r -= trend
-        r /= alpha_dc
-        decomp = Decomposition(r._ops)
-        reconstructed = decomp.compose(r)
+        decomp = Decomposition(simple_df.copy())
+        decomp -= LinearTrend()
+        decomp /= alpha_dc
+        reconstructed = decomp.compose(decomp)
         np.testing.assert_allclose(reconstructed.data.values, original.values, atol=1e-10)
 
     def test_roundtrip_with_log(self, simple_df):
         """signal -= offset; apply(log, exp)  →  roundtrip."""
         original = simple_df.copy()
-        r = DataCube(simple_df.copy())
-        # Ensure positive values before log
+        decomp = Decomposition(simple_df.copy())
         min_val = simple_df.min().min()
         offset = DataCube(pd.DataFrame(
             min_val - 1.0, index=simple_df.index, columns=simple_df.columns
         ))
-        r -= offset
-        r.apply(np.log, np.exp)
-        decomp = Decomposition(r._ops)
-        reconstructed = decomp.compose(r)
+        decomp -= offset
+        decomp.apply(np.log, np.exp)
+        reconstructed = decomp.compose(decomp)
         np.testing.assert_allclose(reconstructed.data.values, original.values, atol=1e-10)
 
     def test_roundtrip_scalar(self, simple_df):
         """Operations with scalars."""
         original = simple_df.copy()
-        r = DataCube(simple_df.copy())
-        r -= 50
-        r /= 2
-        decomp = Decomposition(r._ops)
-        reconstructed = decomp.compose(r)
+        decomp = Decomposition(simple_df.copy())
+        decomp -= 50
+        decomp /= 2
+        reconstructed = decomp.compose(decomp)
         np.testing.assert_allclose(reconstructed.data.values, original.values, atol=1e-10)
 
 
@@ -157,22 +175,19 @@ class TestDecompositionCompose:
 class TestDecompositionRepr:
 
     def test_repr_simple(self, simple_df):
-        r = DataCube(simple_df.copy())
-        trend = LinearTrend().fit(simple_df)
-        r -= trend
-        decomp = Decomposition(r._ops)
+        decomp = Decomposition(simple_df.copy())
+        decomp -= LinearTrend()
         text = repr(decomp)
         assert "residual" in text
         assert "LinearTrend" in text
 
     def test_repr_with_unary(self, simple_df):
-        r = DataCube(simple_df.copy())
+        decomp = Decomposition(simple_df.copy())
         offset = DataCube(pd.DataFrame(
             simple_df.min().min() - 1, index=simple_df.index, columns=simple_df.columns
         ))
-        r -= offset
-        r.apply(np.log, np.exp)
-        decomp = Decomposition(r._ops)
+        decomp -= offset
+        decomp.apply(np.log, np.exp)
         text = repr(decomp)
         assert "exp" in text
         assert "residual" in text
@@ -185,15 +200,80 @@ class TestDecompositionRepr:
 class TestDecompositionComponents:
 
     def test_components_list(self, simple_df, alpha_dc):
-        r = DataCube(simple_df.copy())
-        trend = LinearTrend().fit(simple_df)
-        r -= trend
-        r /= alpha_dc
-        decomp = Decomposition(r._ops)
+        decomp = Decomposition(simple_df.copy())
+        decomp -= LinearTrend()
+        decomp /= alpha_dc
         comps = decomp.components()
         assert len(comps) == 2
-        assert comps[0] is trend
-        assert comps[1] is alpha_dc
+
+
+# ---------------------------------------------------------------------------
+# Decomposition — residual property
+# ---------------------------------------------------------------------------
+
+class TestDecompositionResidual:
+
+    def test_residual_before_fit_raises(self, simple_df):
+        decomp = Decomposition(simple_df.copy())
+        decomp -= 10
+        with pytest.raises(ValueError, match="Call fit"):
+            _ = decomp.residual
+
+    def test_residual_after_fit(self, simple_df):
+        decomp = Decomposition(simple_df.copy())
+        decomp -= 10
+        decomp.fit(simple_df)
+        residual = decomp.residual
+        assert isinstance(residual, pd.DataFrame)
+        np.testing.assert_allclose(residual.values, (simple_df - 10).values)
+
+    def test_residual_with_trend(self, simple_df):
+        """fit() deep-copies and refits trend components, storing final residual."""
+        decomp = Decomposition(simple_df.copy())
+        decomp -= LinearTrend()
+        decomp.fit(simple_df)
+        residual = decomp.residual
+        assert isinstance(residual, pd.DataFrame)
+        assert len(residual) == len(simple_df)
+
+
+# ---------------------------------------------------------------------------
+# Decomposition — is a DataCube, not a TimeSeriesModel
+# ---------------------------------------------------------------------------
+
+class TestDecompositionIsNotModel:
+
+    def test_decomposition_is_not_timeseriesmodel(self):
+        from pasts.core.base_model import TimeSeriesModel
+        assert not issubclass(Decomposition, TimeSeriesModel)
+
+    def test_decomposition_is_datacube(self):
+        assert issubclass(Decomposition, DataCube)
+
+
+# ---------------------------------------------------------------------------
+# Signal decomposition API
+# ---------------------------------------------------------------------------
+
+class TestSignalDecomposition:
+
+    def test_decompose_creates_slot(self, simple_df):
+        sig = Signal(simple_df.copy())
+        sig.decompose()
+        assert sig.residual is not None
+        assert isinstance(sig.residual, DecompositionModel)
+
+    def test_decompose_named(self, simple_df):
+        sig = Signal(simple_df.copy())
+        sig.decompose("trend")
+        assert "trend" in sig.decompositions
+        assert isinstance(sig.decompositions["trend"], DecompositionModel)
+
+    def test_residual_operators(self, simple_df):
+        sig = Signal(simple_df.copy())
+        sig.decompose()
+        sig.residual -= LinearTrend()
+        assert len(sig.residual._ops) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -255,51 +335,12 @@ class TestDataCubeOperators:
         result = 2 * dc
         assert isinstance(result, DataCube)
 
-    def test_unknown_type_returns_not_implemented(self, simple_df):
+    def test_unknown_type_raises(self, simple_df):
         dc = DataCube(simple_df)
-        assert dc.__add__("string") is NotImplemented
-        assert dc.__mul__("string") is NotImplemented
-
-
-# ---------------------------------------------------------------------------
-# Signal integration
-# ---------------------------------------------------------------------------
-
-class TestSignalDecomposition:
-
-    def test_decompose_creates_residual(self, simple_df, tmp_path):
-        from pasts.signal import Signal
-        signal = Signal(simple_df, path=str(tmp_path))
-        signal.decompose()
-        assert signal.residual is not None
-        from pasts.signal import Signal
-        assert isinstance(signal.residual, Signal)
-        pd.testing.assert_frame_equal(signal.residual.data, simple_df)
-
-    def test_decomposition_property(self, simple_df, tmp_path):
-        from pasts.signal import Signal
-        signal = Signal(simple_df, path=str(tmp_path))
-        signal.decompose()
-        signal.residual -= LinearTrend()
-        decomp = signal.decomposition
-        assert isinstance(decomp, Decomposition)
-        assert len(decomp.components()) == 1
-
-    def test_decomposition_raises_without_decompose(self, simple_df, tmp_path):
-        from pasts.signal import Signal
-        signal = Signal(simple_df, path=str(tmp_path))
-        with pytest.raises(AttributeError):
-            _ = signal.decomposition
-
-    def test_full_roundtrip_via_signal(self, simple_df, tmp_path):
-        from pasts.signal import Signal
-        signal = Signal(simple_df, path=str(tmp_path))
-        signal.decompose()
-        signal.residual -= LinearTrend()
-        signal.residual /= 2
-        R = DataCube(signal.residual.data.copy())
-        reconstructed = signal.decomposition.compose(R)
-        np.testing.assert_allclose(reconstructed.data.values, simple_df.values, atol=1e-10)
+        with pytest.raises(Exception):
+            dc + "string"
+        with pytest.raises(Exception):
+            dc * "string"
 
 
 # ---------------------------------------------------------------------------
@@ -316,51 +357,6 @@ class TestStandaloneModelAPI:
         assert isinstance(forecast, pd.DataFrame)
         assert len(forecast) == 10
 
-    def test_decomposition_fit_forecast(self, simple_df):
-        """Decomposition with ops + model can fit and forecast standalone."""
-        from darts.models import ExponentialSmoothing
-        from pasts.components.darts_model import DartsModel
-
-        # Build ops via DataCube (imperative workflow)
-        r = DataCube(simple_df.copy())
-        trend = LinearTrend().fit(simple_df)
-        r -= trend
-
-        # Create Decomposition with model
-        decomp = Decomposition(r._ops, model=DartsModel(ExponentialSmoothing()))
-        decomp.fit(simple_df)
-        forecast = decomp.forecast(5)
-        assert isinstance(forecast, pd.DataFrame)
-        assert len(forecast) == 5
-
-    def test_decomposition_reverse_transform_positive(self, simple_df):
-        """Decomposition.reverse_transform(positive) returns forecast values."""
-        from darts.models import ExponentialSmoothing
-        from pasts.components.darts_model import DartsModel
-
-        r = DataCube(simple_df.copy())
-        trend = LinearTrend().fit(simple_df)
-        r -= trend
-
-        decomp = Decomposition(r._ops, model=DartsModel(ExponentialSmoothing()))
-        decomp.fit(simple_df)
-        result = decomp.reverse_transform(5)
-        assert isinstance(result, pd.DataFrame)
-        assert len(result) == 5
-
-    def test_decomposition_without_model_raises(self, simple_df):
-        """reverse_transform raises when no model is set."""
-        r = DataCube(simple_df.copy())
-        r -= 10
-        decomp = Decomposition(r._ops)
-        with pytest.raises(ValueError, match="No residual model"):
-            decomp.reverse_transform(5)
-
-    def test_decomposition_is_timeseriesmodel(self):
-        """Decomposition inherits from TimeSeriesModel."""
-        from pasts.core.base_model import TimeSeriesModel
-        assert issubclass(Decomposition, TimeSeriesModel)
-
     def test_darts_model_forecast(self, simple_df):
         """DartsModel.fit(X).forecast(h) works standalone."""
         from darts.models import ExponentialSmoothing
@@ -371,3 +367,44 @@ class TestStandaloneModelAPI:
         forecast = model.forecast(5)
         assert isinstance(forecast, pd.DataFrame)
         assert len(forecast) == 5
+
+    def test_darts_model_with_decomposition_fit_forecast(self, simple_df):
+        """DartsModel with decomposition: fit applies decomposition, forecast recomposes."""
+        from darts.models import ExponentialSmoothing
+        from pasts.components.darts_model import DartsModel
+
+        decomp = Decomposition(simple_df.copy())
+        decomp -= LinearTrend()
+
+        model = DartsModel(ExponentialSmoothing(), decomposition=decomp)
+        model.fit(simple_df)
+        forecast = model.forecast(5)
+        assert isinstance(forecast, pd.DataFrame)
+        assert len(forecast) == 5
+
+    def test_darts_model_with_decomposition_reverse_transform_is_residual_space(self, simple_df):
+        """reverse_transform stays in residual space (no recomposition)."""
+        from darts.models import ExponentialSmoothing
+        from pasts.components.darts_model import DartsModel
+
+        decomp = Decomposition(simple_df.copy())
+        decomp -= LinearTrend()
+
+        model = DartsModel(ExponentialSmoothing(), decomposition=decomp)
+        model.fit(simple_df)
+
+        raw = model.reverse_transform(5)
+        recomposed = model.forecast(5)
+        # raw is in residual space, recomposed is in original space — they should differ
+        assert not np.allclose(raw.values, recomposed.values)
+
+    def test_darts_model_without_decomposition_forecast_equals_reverse_transform(self, simple_df):
+        """Without decomposition, forecast == reverse_transform."""
+        from darts.models import ExponentialSmoothing
+        from pasts.components.darts_model import DartsModel
+
+        model = DartsModel(ExponentialSmoothing())
+        model.fit(simple_df)
+        raw = model.reverse_transform(5)
+        forecast = model.forecast(5)
+        pd.testing.assert_frame_equal(raw, forecast)

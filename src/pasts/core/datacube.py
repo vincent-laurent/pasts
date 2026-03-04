@@ -8,9 +8,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and limitations under the License.
 
-import functools
 import operator
 
+import numpy as np
 import pandas as pd
 
 
@@ -41,15 +41,15 @@ BINARY_SYMBOL = {
 }
 
 
-def _record(op):
-    """Decorator: records the inverse binary op in _ops before executing."""
-    def decorator(method):
-        @functools.wraps(method)
-        def wrapper(self, other):
-            self._ops.append(('binary', BINARY_INVERSE[op], other))
-            return method(self, other)
-        return wrapper
-    return decorator
+def _make_future_index(origin_index: pd.Index, i: int) -> pd.Index:
+    """Generate a future index of length *i* extending *origin_index*."""
+    if isinstance(origin_index, pd.DatetimeIndex):
+        freq = origin_index.freq or pd.infer_freq(origin_index)
+        return pd.date_range(start=origin_index[-1], periods=i + 1, freq=freq)[1:]
+    # Numeric index: extend with constant step
+    step = np.mean(np.diff(origin_index.to_numpy(dtype=float)))
+    start = float(origin_index[-1])
+    return pd.Index(start + np.arange(1, i + 1) * step)
 
 
 def _to_dataframe(component, index: pd.Index, horizon: int = None):
@@ -84,60 +84,51 @@ def _to_dataframe(component, index: pd.Index, horizon: int = None):
     raise TypeError(f"Unsupported component type: {type(component)}")
 
 
-class DataCube:
-    """
-    Data structure wrapping a DataFrame with a temporal index.
+class Operation:
+    """Base class for recording reversible operations.
 
-    The index (X axis) must be either a ``DatetimeIndex`` or a numeric
-    index (int / float).  A ``TypeError`` is raised otherwise.
-
-    In-place operators (-=, /=, *=, +=) are recorded in ``_ops`` so that
-    a :class:`~pasts.core.decomposition.Decomposition` can reverse them.
-
-    Operators +, -, *, / delegate directly to pandas.
+    In-place operators (``-=``, ``+=``, ``*=``, ``/=``) record each
+    operation in ``_ops`` and call a hook (``_apply_binary``) that
+    subclasses can override to apply the operation to data.
 
     Attributes
     ----------
-    data : pd.DataFrame
-        The underlying DataFrame.
     _ops : list
-        Stack of recorded operations (populated by in-place operators).
+        Stack of recorded operations.
     """
 
-    def __init__(self, data: pd.DataFrame):
-        _check_temporal_index(data.index)
-        self._data = data
+    def __init__(self):
         self._ops = []
 
-    @property
-    def data(self):
-        return self._data
+    def _apply_binary(self, op, other):
+        """Hook called after recording a binary op. No-op by default."""
+        pass
 
-    # --- In-place binary operators (recorded) ---
+    def _apply_unary(self, func):
+        """Hook called after recording a unary op. No-op by default."""
+        pass
 
-    @_record(operator.sub)
     def __isub__(self, other):
-        self._data -= _to_dataframe(other, self._data.index)
+        self._ops.append(('binary', operator.add, other))
+        self._apply_binary(operator.sub, other)
         return self
 
-    @_record(operator.truediv)
-    def __itruediv__(self, other):
-        self._data /= _to_dataframe(other, self._data.index)
-        return self
-
-    @_record(operator.mul)
-    def __imul__(self, other):
-        self._data *= _to_dataframe(other, self._data.index)
-        return self
-
-    @_record(operator.add)
     def __iadd__(self, other):
-        self._data += _to_dataframe(other, self._data.index)
+        self._ops.append(('binary', operator.sub, other))
+        self._apply_binary(operator.add, other)
         return self
 
-    # --- Unary transformation (recorded) ---
+    def __imul__(self, other):
+        self._ops.append(('binary', operator.truediv, other))
+        self._apply_binary(operator.mul, other)
+        return self
 
-    def apply(self, func, inverse) -> "DataCube":
+    def __itruediv__(self, other):
+        self._ops.append(('binary', operator.mul, other))
+        self._apply_binary(operator.truediv, other)
+        return self
+
+    def apply(self, func, inverse) -> "Operation":
         """Apply a unary function and record its inverse.
 
         Parameters
@@ -152,67 +143,83 @@ class DataCube:
         self
         """
         self._ops.append(('unary', func, inverse))
-        self._data = func(self._data)
+        self._apply_unary(func)
         return self
 
-    # --- Forward binary operators ---
+    def components(self) -> list:
+        """List the components used in binary operations."""
+        return [entry[-1] for entry in self._ops if entry[0] == 'binary']
 
-    def __add__(self, other):
-        if isinstance(other, DataCube):
-            return DataCube(self._data + other._data)
-        if isinstance(other, (int, float)):
-            return DataCube(self._data + other)
-        return NotImplemented
+    def __repr__(self):
+        expr = "residual"
+        for entry in reversed(self._ops):
+            if entry[0] == 'unary':
+                _, _, inverse = entry
+                name = getattr(inverse, '__name__', str(inverse))
+                expr = f"{name}({expr})"
+            elif entry[0] == 'binary':
+                _, inverse_op, comp = entry
+                name = getattr(comp, 'name', comp.__class__.__name__)
+                sym = BINARY_SYMBOL[inverse_op]
+                if sym in ('*', '/'):
+                    if '+' in expr or '-' in expr:
+                        expr = f"{name} {sym} ({expr})"
+                    else:
+                        expr = f"{name} {sym} {expr}"
+                else:
+                    expr = f"{name} {sym} {expr}"
+        return expr
 
-    def __sub__(self, other):
-        if isinstance(other, DataCube):
-            return DataCube(self._data - other._data)
-        if isinstance(other, (int, float)):
-            return DataCube(self._data - other)
-        return NotImplemented
+class DataCube(Operation, pd.DataFrame):
+    """
+    Data structure wrapping a DataFrame with a temporal index.
 
-    def __mul__(self, other):
-        if isinstance(other, DataCube):
-            return DataCube(self._data * other._data)
-        if isinstance(other, (int, float)):
-            return DataCube(self._data * other)
-        return NotImplemented
+    Inherits from ``pd.DataFrame`` so that forward operators
+    (+, -, *, /) work out of the box.
 
-    def __truediv__(self, other):
-        if isinstance(other, DataCube):
-            return DataCube(self._data / other._data)
-        if isinstance(other, (int, float)):
-            return DataCube(self._data / other)
-        return NotImplemented
+    In-place operators (-=, /=, *=, +=) are recorded in ``_ops`` so that
+    a :class:`~pasts.core.decomposition.Decomposition` can reverse them.
 
-    # --- Reverse binary operators (scalar on the left) ---
+    Attributes
+    ----------
+    _ops : list
+        Stack of recorded operations (populated by in-place operators).
+    """
 
-    def __radd__(self, other):
-        if isinstance(other, (int, float)):
-            return DataCube(other + self._data)
-        return NotImplemented
+    _metadata = ['_ops']
 
-    def __rsub__(self, other):
-        if isinstance(other, (int, float)):
-            return DataCube(other - self._data)
-        return NotImplemented
+    def __init__(self, data=None, **kwargs):
+        Operation.__init__(self)
+        if data is not None and isinstance(data, pd.DataFrame):
+            _check_temporal_index(data.index)
+        pd.DataFrame.__init__(self, data=data, **kwargs)
 
-    def __rmul__(self, other):
-        if isinstance(other, (int, float)):
-            return DataCube(other * self._data)
-        return NotImplemented
+    @property
+    def _constructor(self):
+        return _datacube_internal
 
-    def __rtruediv__(self, other):
-        if isinstance(other, (int, float)):
-            return DataCube(other / self._data)
-        return NotImplemented
+    @property
+    def data(self):
+        return pd.DataFrame(self)
 
-    # --- Unary ---
 
-    def __neg__(self):
-        return DataCube(-self._data)
+    def _apply_binary(self, op, other):
+        values = _to_dataframe(other, self.index)
+        result = op(pd.DataFrame(self), values)
+        self[result.columns] = result
 
-    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        inputs = tuple(x._data if isinstance(x, DataCube) else x for x in inputs)
-        result = getattr(ufunc, method)(*inputs, **kwargs)
-        return DataCube(result)
+    def _apply_unary(self, func):
+        result = func(pd.DataFrame(self))
+        pd.DataFrame.__init__(self, data=result)
+
+
+def _datacube_internal(data=None, **kwargs):
+    """Construct a DataCube without index validation.
+
+    Used as ``_constructor`` so that pandas-internal operations (e.g.
+    ``.sum()``, ``.mean()``) that produce non-temporal indices don't crash.
+    """
+    obj = DataCube.__new__(DataCube)
+    Operation.__init__(obj)
+    pd.DataFrame.__init__(obj, data=data, **kwargs)
+    return obj

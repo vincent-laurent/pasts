@@ -16,6 +16,7 @@ from statsmodels.tsa.filters.hp_filter import hpfilter
 from statsmodels.tsa.seasonal import STL
 
 from pasts.core.base_model import TimeSeriesModel
+from pasts.core.datacube import _make_future_index
 
 
 # ---------------------------------------------------------------------------
@@ -40,17 +41,6 @@ def _restore_nan(trend: pd.DataFrame, mask: pd.DataFrame) -> pd.DataFrame:
         trend = trend.copy()
         trend[mask] = np.nan
     return trend
-
-
-def _make_future_index(origin_index: pd.Index, i: int) -> pd.Index:
-    """Generate a future index of length *i* extending *origin_index*."""
-    if isinstance(origin_index, pd.DatetimeIndex):
-        freq = origin_index.freq or pd.infer_freq(origin_index)
-        return pd.date_range(start=origin_index[-1], periods=i + 1, freq=freq)[1:]
-    # Numeric index: extend with constant step
-    step = np.mean(np.diff(origin_index.to_numpy(dtype=float)))
-    start = float(origin_index[-1])
-    return pd.Index(start + np.arange(1, i + 1) * step)
 
 
 # ---------------------------------------------------------------------------
@@ -90,8 +80,8 @@ class LinearTrend(TimeSeriesModel):
 
     nan_safe = True
 
-    def __init__(self):
-        ...
+    def __init__(self, lags: int = None):
+        self.lags = lags
 
     def fit(self, X: pd.DataFrame, covariates=None) -> "LinearTrend":
         """
@@ -112,8 +102,16 @@ class LinearTrend(TimeSeriesModel):
         self.time_index = X.index.to_numpy(dtype="float64") * 1e-17
         self.features_ = X.columns
         x_filled, _ = _handle_nan(X)
+
+        if self.lags is not None:
+            fit_t = self.time_index[-self.lags:]
+            fit_v = x_filled.values[-self.lags:]
+        else:
+            fit_t = self.time_index
+            fit_v = x_filled.values
+
         estimator = LinearRegression()
-        estimator.fit(self.time_index.reshape(-1, 1), x_filled.values)
+        estimator.fit(fit_t.reshape(-1, 1), fit_v)
         self.coef_ = estimator.coef_                    # shape (n_columns, 1)
         self.intercept_ = estimator.intercept_          # shape (n_columns,)
         self.t0_ = self.time_index[-1]
@@ -122,7 +120,7 @@ class LinearTrend(TimeSeriesModel):
     def _from_i_to_vector(self, i: int) -> np.ndarray:
         """Return past (i<0) or future (i>0) float time vector of length |i|."""
         if i > 0:
-            return self.t0_ + np.arange(i) * np.mean(np.diff(self.time_index))
+            return self.t0_ + np.arange(1, i + 1) * np.mean(np.diff(self.time_index))
         return self.time_index[i:]
 
     def _from_i_to_time_index(self, i: int) -> pd.DatetimeIndex:
@@ -178,23 +176,52 @@ class NonParametricTrend(TimeSeriesModel):
     extrapolation : str
         Strategy for future values: ``'constant'`` (repeat last trend value)
         or ``'linear'`` (linear extrapolation from stored trend).
+        Ignored when *forecast_model* is provided.
+    forecast_model : object, optional
+        A forecasting model used to extrapolate the trend into the future.
+        Accepts any Darts model (e.g. ``ExponentialSmoothing()``) or a
+        :class:`TimeSeriesModel` instance.  When provided, the model is
+        fitted on the estimated trend and used for future extrapolation
+        instead of the simple ``extrapolation`` strategy.
     """
 
     nan_safe = True
 
-    def __init__(self, extrapolation: str = 'constant'):
+    def __init__(self, extrapolation: str = 'constant', forecast_model=None):
         self._extrapolation = extrapolation
+        self._forecast_model = forecast_model
+        self._fitted_forecast_model = None
+
+    def _fit_forecast_model(self, trend: pd.DataFrame):
+        """Fit the forecast model on the estimated trend."""
+        import copy
+        from pasts.components.darts_model import DartsModel
+
+        model = copy.deepcopy(self._forecast_model)
+        if not isinstance(model, TimeSeriesModel):
+            model = DartsModel(model)
+        trend_clean = trend.interpolate(method='linear').bfill().ffill()
+        model.fit(trend_clean)
+        return model
 
     def _store_trend(self, X: pd.DataFrame, trend_values: pd.DataFrame):
         """Store the extracted trend and metadata after fitting."""
         self._trend = trend_values
         self._origin_index = X.index
         self._features = X.columns
+        if self._forecast_model is not None:
+            self._fitted_forecast_model = self._fit_forecast_model(trend_values)
 
     def reverse_transform(self, i: int) -> pd.DataFrame:
         if i < 0:
             return self._trend.iloc[i:]
-        # Future extrapolation
+        # Future extrapolation via forecast model
+        if self._fitted_forecast_model is not None:
+            forecast = self._fitted_forecast_model.reverse_transform(i)
+            # Anchor to last training trend value for continuity
+            offset = self._trend.iloc[-1].values - forecast.iloc[0].values
+            return forecast + offset
+        # Fallback: simple strategies
         future_idx = _make_future_index(self._origin_index, i)
         if self._extrapolation == 'constant':
             last = self._trend.iloc[-1].values
@@ -227,10 +254,13 @@ class MovingAverageTrend(NonParametricTrend):
         Whether to center the rolling window (default ``True``).
     extrapolation : str
         Future extrapolation strategy (``'constant'`` or ``'linear'``).
+    forecast_model : object, optional
+        Forecasting model for trend extrapolation (see :class:`NonParametricTrend`).
     """
 
-    def __init__(self, window: int, center: bool = True, extrapolation: str = 'constant'):
-        super().__init__(extrapolation)
+    def __init__(self, window: int, center: bool = True, extrapolation: str = 'constant',
+                 forecast_model=None):
+        super().__init__(extrapolation, forecast_model)
         self.window = window
         self.center = center
 
@@ -249,10 +279,13 @@ class HPFilterTrend(NonParametricTrend):
         Smoothing parameter (default 1600, standard for quarterly data).
     extrapolation : str
         Future extrapolation strategy (``'constant'`` or ``'linear'``).
+    forecast_model : object, optional
+        Forecasting model for trend extrapolation (see :class:`NonParametricTrend`).
     """
 
-    def __init__(self, lamb: float = 1600, extrapolation: str = 'constant'):
-        super().__init__(extrapolation)
+    def __init__(self, lamb: float = 1600, extrapolation: str = 'constant',
+                 forecast_model=None):
+        super().__init__(extrapolation, forecast_model)
         self.lamb = lamb
 
     def fit(self, X: pd.DataFrame, covariates=None) -> "HPFilterTrend":
@@ -275,10 +308,13 @@ class STLTrend(NonParametricTrend):
         Seasonal period of the data.
     extrapolation : str
         Future extrapolation strategy (``'constant'`` or ``'linear'``).
+    forecast_model : object, optional
+        Forecasting model for trend extrapolation (see :class:`NonParametricTrend`).
     """
 
-    def __init__(self, period: int, extrapolation: str = 'constant'):
-        super().__init__(extrapolation)
+    def __init__(self, period: int, extrapolation: str = 'constant',
+                 forecast_model=None):
+        super().__init__(extrapolation, forecast_model)
         self.period = period
 
     def fit(self, X: pd.DataFrame, covariates=None) -> "STLTrend":
@@ -304,10 +340,12 @@ class EMDTrend(NonParametricTrend):
     ----------
     extrapolation : str
         Future extrapolation strategy (``'constant'`` or ``'linear'``).
+    forecast_model : object, optional
+        Forecasting model for trend extrapolation (see :class:`NonParametricTrend`).
     """
 
-    def __init__(self, extrapolation: str = 'constant'):
-        super().__init__(extrapolation)
+    def __init__(self, extrapolation: str = 'constant', forecast_model=None):
+        super().__init__(extrapolation, forecast_model)
 
     def fit(self, X: pd.DataFrame, covariates=None) -> "EMDTrend":
         try:
@@ -344,10 +382,13 @@ class HighPassFilterTrend(NonParametricTrend):
         Order of the Butterworth filter (default 2).
     extrapolation : str
         Future extrapolation strategy (``'constant'`` or ``'linear'``).
+    forecast_model : object, optional
+        Forecasting model for trend extrapolation (see :class:`NonParametricTrend`).
     """
 
-    def __init__(self, cutoff: float, fs: float, order: int = 2, extrapolation: str = 'constant'):
-        super().__init__(extrapolation)
+    def __init__(self, cutoff: float, fs: float, order: int = 2, extrapolation: str = 'linear',
+                 forecast_model=None):
+        super().__init__(extrapolation, forecast_model)
         self.cutoff = cutoff
         self.fs = fs
         self.order = order

@@ -137,11 +137,12 @@ class TestSignalSetCovariates:
         with pytest.raises(ValueError, match="Past covariates"):
             sig.set_covariates(past_covariates=short)
 
-    def test_decomposition_shares_covariates(self, signal_data, past_cov):
+    def test_decomposition_creates_decomposition_model(self, signal_data, past_cov):
         sig = Signal(signal_data.copy())
         sig.set_covariates(past_covariates=past_cov)
         sig.decompose("test")
-        assert sig.decompositions["test"].covariates is sig.covariates
+        from pasts.core.decomposition import DecompositionModel
+        assert isinstance(sig.decompositions["test"], DecompositionModel)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +185,7 @@ class TestDartsModelWithCovariates:
         sig.apply_model(
             LinearRegressionModel(lags=12, lags_future_covariates=[0, 1, 2])
         )
+        sig.refit("LinearRegressionModel")
         sig.forecast("LinearRegressionModel", horizon=12)
         assert sig.models["LinearRegressionModel"].forecast_data is not None
         assert len(sig.models["LinearRegressionModel"].forecast_data) == 12

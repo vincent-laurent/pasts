@@ -114,10 +114,10 @@ def run_scenario_store_level():
     stores_sample = ["store_3", "store_25", "store_44", "store_47", "store_50", "store_53"]
     stores_sample = [s for s in stores_sample if s in df_store.columns]
     df = df_store[stores_sample].copy()
-
+    df.index
     signal = Signal(df, path=os.path.join(OUTPUT_DIR, "store_level"))
 
-
+    signal.handle_nan(method="interpolate")
     # Statistical tests
     signal.stat.test_stationarity()
 
