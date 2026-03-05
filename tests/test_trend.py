@@ -297,6 +297,33 @@ class TestDifferencing:
         assert len(signal.residual._ops) == 1
         assert signal.residual._ops[0][0] == 'unary'
 
+    def test_anchor_updates_after_second_forward(self, univariate_ts):
+        """Anchors must update when forward() is called on new data (refit scenario)."""
+        train = univariate_ts.iloc[:80]
+        all_data = univariate_ts
+
+        diff = Differencing(order=1).fit(train)
+
+        # Simulate refit: forward is called on all_data
+        diff.forward(all_data)
+
+        # Simulate forecast: inverse on predicted diffs
+        future_idx = pd.date_range(
+            start=all_data.index[-1], periods=4, freq="MS"
+        )[1:]
+        predicted_diffs = pd.DataFrame(
+            {"value": [1.0, 2.0, -1.0]}, index=future_idx
+        )
+        result = diff.inverse(predicted_diffs)
+
+        # Forecast must continue from last value of all_data, not train
+        last_all = all_data.iloc[-1, 0]
+        expected = last_all + np.cumsum([1.0, 2.0, -1.0])
+        np.testing.assert_allclose(
+            result["value"].values, expected, atol=1e-10,
+            err_msg="Anchor should be last value of all_data, not train_data"
+        )
+
     def test_nan_propagation(self, ts_with_nan):
         diff = Differencing(order=1).fit(ts_with_nan)
         forward = diff.forward(ts_with_nan)

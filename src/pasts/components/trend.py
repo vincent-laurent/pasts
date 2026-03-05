@@ -445,6 +445,7 @@ class Differencing:
 
     def forward(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply differencing (forward transform)."""
+        self.fit(df)  # Update anchors to match the data being transformed
         result = df.copy()
         for _ in range(self.order):
             result = result.diff()
