@@ -128,7 +128,7 @@ for g in sorted(group_map.unique()):
     signal.residual -= LinearTrend(lags=200)
 
     t1 = time.time()
-    signal.apply_model(RandomForestModel(lags=100, n_jobs=-1, n_estimators=20, max_depth=10))
+    signal.apply_model(RandomForestModel(lags=50, n_jobs=-1, n_estimators=20, max_depth=10))
     print(f"  LightGBM fit in {time.time() - t1:.1f}s")
 
     signal.compute_scores()

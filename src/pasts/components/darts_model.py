@@ -137,8 +137,14 @@ class DartsModel(TimeSeriesModel):
                 f"Handle missing values before fitting (e.g. df.fillna(0), df.dropna(), "
                 f"df.interpolate())."
             )
+        if isinstance(X.index, pd.DatetimeIndex) and X.index.freq is None:
+            inferred = pd.infer_freq(X.index)
+            if inferred is not None:
+                X = X.asfreq(inferred)
+
+        freq_arg = X.index.freq if isinstance(X.index, pd.DatetimeIndex) else None
         from darts import TimeSeries
-        self._train_series = TimeSeries.from_dataframe(X)
+        self._train_series = TimeSeries.from_dataframe(X, fill_missing_dates=True, freq=freq_arg)
 
         # Attach static covariates to the TimeSeries object
         if covariates is not None and covariates.static is not None:

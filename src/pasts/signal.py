@@ -10,7 +10,6 @@
 
 import copy
 import os
-import warnings
 from typing import Union
 
 import pandas as pd
@@ -27,6 +26,7 @@ from pasts.metrics import Metrics
 from pasts import persistence
 from pasts.visualization import PlotAccessor
 from pasts.prediction_intervals import CIAccessor
+from pasts.core.handle_nan import NaNHandler
 
 
 class Signal(DataCube):
@@ -154,38 +154,22 @@ class Signal(DataCube):
         validate_covariates(self.data.index, cov)
         self._covariates = cov
 
-    def handle_nan(self, method: str = "drop", **kwargs) -> None:
-        """Remove or fill NaN values in the signal data (in place).
+    @property
+    def handle_nan(self) -> NaNHandler:
+        """Accessor for NaN handling.
 
-        Parameters
-        ----------
-        method : str
-            ``"drop"`` — drop rows containing any NaN (default).
-            ``"fill"`` — fill NaN with a value (default 0, override via *value=…*).
-            ``"interpolate"`` — ``pandas.DataFrame.interpolate`` + bfill + ffill.
-        **kwargs
-            Passed to the underlying pandas method (e.g. ``value=0`` for
-            ``"fill"``, ``method='linear'`` for ``"interpolate"``).
+        Usage::
+
+            signal.handle_nan.fill(value=0)
+            signal.handle_nan.interpolate(max_consecutive=5)
+            signal.handle_nan.extrapolate(method='ffill')
+            signal.handle_nan.before_launch(value=0)
+            signal.handle_nan.after_stops(value=0)
+
+            # chainable
+            signal.handle_nan.before_launch(0).interpolate(max_consecutive=5).after_stops(0)
         """
-        if method == "drop":
-            result = self.dropna(**kwargs)
-        elif method == "fill":
-            result = self.fillna(kwargs.pop("value", 0), **kwargs)
-        elif method == "interpolate":
-            result = self.interpolate(**kwargs).bfill().ffill()
-        else:
-            raise ValueError(
-                f"Unknown method {method!r}. Use 'drop', 'fill', or 'interpolate'."
-            )
-        pd.DataFrame.__init__(self, data=result)
-        self._properties = Signal._profiling(self)
-        if self._validation._timestamp is not None:
-            self._validation.reset()
-            warnings.warn(
-                "Train/test split has been reset after handle_nan(). "
-                "Call validation_split() again.",
-                UserWarning,
-            )
+        return NaNHandler(self)
 
     # -------------------------------------------------------------------
     # Decomposition
